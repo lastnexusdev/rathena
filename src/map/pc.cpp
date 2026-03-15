@@ -2124,6 +2124,7 @@ bool pc_authok(map_session_data *sd, uint32 login_id2, time_t expiration_time, i
 	sd->pvp_timer = INVALID_TIMER;
 	sd->expiration_tid = INVALID_TIMER;
 	sd->autotrade_tid = INVALID_TIMER;
+	sd->soul_deadline_tid = INVALID_TIMER;
 	sd->respawn_tid = INVALID_TIMER;
 	sd->tid_queue_active = INVALID_TIMER;
 	sd->macro_detect.timer = INVALID_TIMER;
@@ -9783,6 +9784,11 @@ int32 pc_dead(map_session_data *sd,block_list *src)
 			status_percent_heal(sd, 100, 100);
 			clif_resurrection( *sd );
 			pc_setinvincibletimer( *sd );
+
+			if( sd->soul_deadline_tid != INVALID_TIMER ){
+				delete_timer( sd->soul_deadline_tid, pc_soul_deadline_timer );
+				sd->soul_deadline_tid = INVALID_TIMER;
+			}
 			sc_start(sd,sd,SC_STEELBODY,100,5,skill_get_time(MO_STEELBODY,5));
 			if(mapdata_flag_gvg2(mapdata))
 				pc_respawn_timer(INVALID_TIMER, gettick(), sd->id, 0);
@@ -9876,6 +9882,14 @@ int32 pc_dead(map_session_data *sd,block_list *src)
 	pc_setdead(sd);
 
 	clif_party_dead( *sd );
+
+	if( sd->soul_deadline_tid != INVALID_TIMER ){
+		delete_timer( sd->soul_deadline_tid, pc_soul_deadline_timer );
+		sd->soul_deadline_tid = INVALID_TIMER;
+	}
+
+	if( mapdata->getMapFlag(MF_AINCRAD) )
+		sd->soul_deadline_tid = add_timer( tick + 120000, pc_soul_deadline_timer, sd->id, 0 );
 
 	pc_setparam(sd, SP_PCDIECOUNTER, sd->die_counter+1);
 	pc_setparam(sd, SP_KILLERRID, src?src->id:0);
@@ -10144,6 +10158,11 @@ void pc_revive(map_session_data *sd,uint32 hp, uint32 sp, uint32 ap) {
 
 	pc_setstand(sd, true);
 	pc_setinvincibletimer( *sd );
+
+	if( sd->soul_deadline_tid != INVALID_TIMER ){
+		delete_timer( sd->soul_deadline_tid, pc_soul_deadline_timer );
+		sd->soul_deadline_tid = INVALID_TIMER;
+	}
 
 	if (sd->state.gmaster_flag && sd->guild) {
 		guild_guildaura_refresh(sd,GD_LEADERSHIP,guild_checkskill(sd->guild->guild,GD_LEADERSHIP));
@@ -14839,6 +14858,22 @@ TIMER_FUNC(pc_expiration_timer){
 	return 0;
 }
 
+
+TIMER_FUNC(pc_soul_deadline_timer){
+	map_session_data *sd = map_id2sd(id);
+
+	if( !sd )
+		return 0;
+
+	sd->soul_deadline_tid = INVALID_TIMER;
+
+	if( !pc_isdead(sd) )
+		return 0;
+
+	npc_event_do_id("LOST_SOULS::OnSoulLost", sd->id);
+	return 0;
+}
+
 TIMER_FUNC(pc_autotrade_timer){
 	map_session_data *sd = map_id2sd(id);
 
@@ -16128,6 +16163,7 @@ void do_init_pc(void) {
 	add_timer_func_list(pc_spiritcharm_timer, "pc_spiritcharm_timer");
 	add_timer_func_list(pc_global_expiration_timer, "pc_global_expiration_timer");
 	add_timer_func_list(pc_expiration_timer, "pc_expiration_timer");
+	add_timer_func_list(pc_soul_deadline_timer, "pc_soul_deadline_timer");
 	add_timer_func_list(pc_autotrade_timer, "pc_autotrade_timer");
 	add_timer_func_list(pc_on_expire_active, "pc_on_expire_active");
 	add_timer_func_list(pc_macro_detector_timeout, "pc_macro_detector_timeout");

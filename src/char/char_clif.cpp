@@ -927,7 +927,7 @@ bool chclif_parse_select_accessible_map( int32 fd, struct char_session_data& sd 
 	char* data;
 
 	// Check if the character exists and is not scheduled for deletion
-	if( SQL_SUCCESS != Sql_Query( sql_handle, "SELECT `char_id` FROM `%s` WHERE `account_id`='%d' AND `char_num`='%d' AND `delete_date` = 0", schema_config.char_db, sd.account_id, p->slot )
+	if( SQL_SUCCESS != Sql_Query( sql_handle, "SELECT `char_id` FROM `%s` WHERE `account_id`='%d' AND `char_num`='%d' AND `delete_date` = 0 AND `is_lost` = 0", schema_config.char_db, sd.account_id, p->slot )
 		|| SQL_SUCCESS != Sql_NextRow( sql_handle )
 		|| SQL_SUCCESS != Sql_GetData( sql_handle, 0, &data, nullptr ) ){
 		// Not found?? May be forged packet.
@@ -1087,7 +1087,7 @@ bool chclif_parse_charselect( int32 fd, struct char_session_data& sd ){
 	int slot = p->slot;
 	char* data;
 
-	if ( SQL_SUCCESS != Sql_Query(sql_handle, "SELECT `char_id` FROM `%s` WHERE `account_id`='%d' AND `char_num`='%d' AND `delete_date` = 0", schema_config.char_db, sd.account_id, slot)
+	if ( SQL_SUCCESS != Sql_Query(sql_handle, "SELECT `char_id` FROM `%s` WHERE `account_id`='%d' AND `char_num`='%d' AND `delete_date` = 0 AND `is_lost` = 0", schema_config.char_db, sd.account_id, slot)
 		|| SQL_SUCCESS != Sql_NextRow(sql_handle)
 		|| SQL_SUCCESS != Sql_GetData(sql_handle, 0, &data, NULL) )
 	{	//Not found?? May be forged packet.
