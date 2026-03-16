@@ -1626,6 +1626,13 @@ int32 status_damage(block_list *src,block_list *target,int64 dhp, int64 dsp, int
 			dhp = status->hp - 1;
 	}
 
+	if( target->type == BL_MOB && !mob_mvp_damage_allowed( reinterpret_cast<mob_data*>(target), src, dhp ) ){
+		hp = 0;
+		sp = 0;
+		ap = 0;
+		dhp = 0;
+	}
+
 	status->hp-= hp;
 	status->sp-= sp;
 	status->ap-= ap;

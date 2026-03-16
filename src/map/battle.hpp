@@ -188,6 +188,10 @@ struct Battle_Config
 	int32 flooritem_lifetime;
 	int32 first_attack_loot_bonus;
 	int32 mvp_to_loot_priority;
+	int32 mvp_lock_enable;
+	int32 mvp_lock_inactivity_timeout;
+	int32 mvp_solo_kill_limit;
+	int32 mvp_solo_cooldown;
 	int32 item_first_get_time;
 	int32 item_second_get_time;
 	int32 item_third_get_time;

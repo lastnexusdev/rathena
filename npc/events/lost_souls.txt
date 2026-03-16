@@ -1,0 +1,74 @@
+// Lost Souls system:
+// - On player death, map server fires LOST_SOULS::OnSoulLost after 2 minutes if still dead.
+// - This script moves character to lost_souls table and marks the character as lost.
+
+-	script	LOST_SOULS	FAKE_NPC,{
+OnSoulLost:
+	if (!isloggedin(getcharid(3))) end;
+	if (!isdead()) end;
+	if (!getmapflag(strcharinfo(3),mf_aincrad)) end;
+
+	.@char_id = getcharid(0);
+	.@account_id = getcharid(3);
+	.@char_num = 0;
+	.@name$ = strcharinfo(0);
+
+	query_sql("SELECT `char_num` FROM `char` WHERE `char_id` = "+.@char_id+" LIMIT 1", .@char_num);
+	if (.@char_num < 0) .@char_num = 0;
+
+	.@now = gettimetick(2);
+	.@delete_after = .@now + (30 * 24 * 60 * 60);
+
+	query_sql("INSERT INTO `lost_souls` (`char_id`,`account_id`,`char_name`,`char_num`,`lost_at`,`delete_after`) VALUES ("
+		+ .@char_id + "," + .@account_id + ",'" + .@name$ + "'," + .@char_num + "," + .@now + "," + .@delete_after + ") "
+		+ "ON DUPLICATE KEY UPDATE `account_id`=VALUES(`account_id`),`char_name`=VALUES(`char_name`),`char_num`=VALUES(`char_num`),`lost_at`=VALUES(`lost_at`),`delete_after`=VALUES(`delete_after`),`restored_at`='0',`restored_by`='',`restored_source`=''");
+
+	query_sql("UPDATE `char` SET `is_lost` = '1', `soul_deadline` = '0', `online` = '0' WHERE `char_id` = " + .@char_id + " LIMIT 1");
+	dispbottom "Your soul has been lost. Use a Soul Recall item to restore this character before 30 days pass.";
+	atcommand "@kick "+strcharinfo(0);
+	end;
+}
+
+prontera,156,181,4	script	Soul Curator	4_F_KAFRA6,{
+	mes "I can recover characters marked as Lost Souls.";
+	mes "A Soul Recall item is required for self-service recovery.";
+	next;
+
+	switch(select("Recover my lost character:GM Restore by Character ID:Cancel")) {
+	case 1:
+		if (countitem(.RestoreItemID) < 1) {
+			mes "You need 1 "+getitemname(.RestoreItemID)+" to recover a lost soul.";
+			close;
+		}
+		.@rows = query_sql("SELECT `char_id`,`char_name` FROM `lost_souls` WHERE `account_id` = "+getcharid(3)+" AND `restored_at` = '0' AND `delete_after` > UNIX_TIMESTAMP() ORDER BY `lost_at` DESC LIMIT 20", .@cid, .@name$);
+		if (!.@rows) {
+			mes "You have no recoverable lost characters.";
+			close;
+		}
+		.@menu$ = "";
+		for (.@i = 0; .@i < .@rows; ++.@i)
+			.@menu$ += .@name$[.@i]+":";
+		.@pick = select(.@menu$) - 1;
+		delitem .RestoreItemID,1;
+		query_sql("UPDATE `char` SET `is_lost`='0', `delete_date`='0' WHERE `char_id`='"+.@cid[.@pick]+"' AND `account_id`='"+getcharid(3)+"' LIMIT 1");
+		query_sql("UPDATE `lost_souls` SET `restored_at`=UNIX_TIMESTAMP(), `restored_by`='"+strcharinfo(0)+"', `restored_source`='player' WHERE `char_id`='"+.@cid[.@pick]+"' LIMIT 1");
+		mes "Recovered. Relog to see the restored character on character select.";
+		close;
+	case 2:
+		if (getgroupid() < 99) {
+			mes "Only GMs can use that option.";
+			close;
+		}
+		input .@target_cid;
+		if (.@target_cid <= 0) close;
+		query_sql("UPDATE `char` SET `is_lost`='0', `delete_date`='0' WHERE `char_id`='"+.@target_cid+"' LIMIT 1");
+		query_sql("UPDATE `lost_souls` SET `restored_at`=UNIX_TIMESTAMP(), `restored_by`='"+strcharinfo(0)+"', `restored_source`='gm' WHERE `char_id`='"+.@target_cid+"' LIMIT 1");
+		mes "If the character existed in lost_souls, it has been restored.";
+		close;
+	}
+	close;
+
+OnInit:
+	.RestoreItemID = 7620; // Old Blue Box by default; replace with your custom recovery item.
+	end;
+}

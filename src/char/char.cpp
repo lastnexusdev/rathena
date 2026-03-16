@@ -930,7 +930,7 @@ int32 char_mmo_chars_fromsql( char_session_data& sd, CHARACTER_INFO chars[], uin
 		"`hotkey_rowshift2`,"
 		"`max_ap`,`ap`,`trait_point`,`pow`,`sta`,`wis`,`spl`,`con`,`crt`,"
 		"`inventory_slots`,`body_direction`,`disable_call`,`disable_partyinvite`,`disable_showcostumes`"
-		" FROM `%s` WHERE `account_id`='%d' AND `char_num` < '%d'", schema_config.char_db, sd.account_id, MAX_CHARS )
+		" FROM `%s` WHERE `account_id`='%d' AND `char_num` < '%d' AND `is_lost` = '0'", schema_config.char_db, sd.account_id, MAX_CHARS )
 	||	SQL_ERROR == stmt.Execute()
 	||	SQL_ERROR == stmt.BindColumn( 0,  SQLDT_INT32, &p.char_id )
 	||	SQL_ERROR == stmt.BindColumn( 1,  SQLDT_UCHAR, &p.slot )
