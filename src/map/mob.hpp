@@ -147,6 +147,12 @@ enum e_mob_bosstype : uint8{
 	BOSSTYPE_MVP
 };
 
+enum e_mvp_lock_type : uint8 {
+	MVP_LOCK_NONE = 0,
+	MVP_LOCK_PARTY,
+	MVP_LOCK_SOLO
+};
+
 /// Monster Aegis AI types
 enum e_aegis_monstertype : uint16 {
 	MONSTER_TYPE_01 = 0x81,
@@ -398,6 +404,12 @@ struct mob_data : public block_list {
 	int32 tomb_nid;
 	uint16 damagetaken;
 
+	e_mvp_lock_type mvp_lock_type;
+	uint32 mvp_lock_char_id;
+	uint32 mvp_lock_account_id;
+	int32 mvp_lock_party_id;
+	t_tick mvp_lock_last_damage_tick;
+
 	e_mob_bosstype get_bosstype() const;
 	map_session_data* get_mvp_player(map_session_data* first_sd);
 };
@@ -486,6 +498,7 @@ struct s_item_drop{
 	struct item item_data;
 	uint16 mob_id;
 	enum bl_type src_type;
+	int32 owner_charid;
 };
 
 struct s_item_drop_list{
@@ -535,6 +548,7 @@ int32 mob_parse_dataset(struct spawn_data *data);
 void mob_log_damage(mob_data* md, block_list* src, int64 damage, int64 damage_tanked = 0);
 void mob_damage(mob_data *md, block_list *src, int32 damage);
 int32 mob_dead(mob_data *md, block_list *src, int32 type);
+bool mob_mvp_damage_allowed(mob_data* md, block_list* src, int64 damage);
 void mob_revive(mob_data *md, uint32 hp);
 void mob_heal(mob_data *md,uint32 heal);
 
