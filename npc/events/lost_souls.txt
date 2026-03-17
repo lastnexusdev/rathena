@@ -29,7 +29,7 @@ OnSoulLost:
 	end;
 }
 
-prontera,156,181,4\tscript\tSoul Curator\t4_F_KAFRA6,{
+prontera,156,181,4	script	Soul Curator	4_F_KAFRA6,{
 	mes "I can recover characters marked as Lost Souls.";
 	mes "A Soul Recall item is required for self-service recovery.";
 	next;
