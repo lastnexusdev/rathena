@@ -2,7 +2,7 @@
 // - On player death, map server fires LOST_SOULS::OnSoulLost after 2 minutes if still dead.
 // - This script moves character to lost_souls table and marks the character as lost.
 
--	script	LOST_SOULS	FAKE_NPC,{
+-\tscript\tLOST_SOULS\tFAKE_NPC,{
 OnSoulLost:
 	if (!isloggedin(getcharid(3))) end;
 	if (!isdead()) end;
