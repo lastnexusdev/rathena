@@ -271,6 +271,8 @@ CREATE TABLE IF NOT EXISTS `char` (
   `fame` int(11) unsigned NOT NULL default '0',
   `rename` SMALLINT(3) unsigned NOT NULL default '0',
   `delete_date` INT(11) UNSIGNED NOT NULL DEFAULT '0',
+  `soul_deadline` INT(11) UNSIGNED NOT NULL DEFAULT '0',
+  `is_lost` TINYINT(1) UNSIGNED NOT NULL DEFAULT '0',
   `moves` int(11) unsigned NOT NULL DEFAULT '0',
   `unban_time` int(11) unsigned NOT NULL default '0',
   `font` tinyint(3) unsigned NOT NULL default '0',
@@ -290,10 +292,28 @@ CREATE TABLE IF NOT EXISTS `char` (
   PRIMARY KEY  (`char_id`),
   UNIQUE KEY `name_key` (`name`),
   KEY `account_id` (`account_id`),
+  KEY `is_lost` (`is_lost`),
   KEY `party_id` (`party_id`),
   KEY `guild_id` (`guild_id`),
   KEY `online` (`online`)
 ) ENGINE=MyISAM AUTO_INCREMENT=150000; 
+
+CREATE TABLE IF NOT EXISTS `lost_souls` (
+  `id` INT(11) UNSIGNED NOT NULL AUTO_INCREMENT,
+  `char_id` INT(11) UNSIGNED NOT NULL,
+  `account_id` INT(11) UNSIGNED NOT NULL,
+  `char_name` VARCHAR(30) NOT NULL DEFAULT '',
+  `char_num` TINYINT(1) UNSIGNED NOT NULL DEFAULT '0',
+  `lost_at` INT(11) UNSIGNED NOT NULL,
+  `delete_after` INT(11) UNSIGNED NOT NULL,
+  `restored_at` INT(11) UNSIGNED NOT NULL DEFAULT '0',
+  `restored_by` VARCHAR(30) NOT NULL DEFAULT '',
+  `restored_source` VARCHAR(16) NOT NULL DEFAULT '',
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `char_id` (`char_id`),
+  KEY `account_id` (`account_id`),
+  KEY `delete_after` (`delete_after`)
+) ENGINE=MyISAM;
 
 --
 -- Table structure for table `char_reg_num`
