@@ -1,0 +1,6 @@
+// Card Combination Blacklist (import)
+// Copy this file to your active db/import folder and add entries.
+// Format: card_id_1,card_id_2
+// Example:
+// 4142,4145
+
