@@ -11836,6 +11836,11 @@ void clif_parse_ActionRequest(int32 fd, map_session_data *sd)
 ///     1 = char-select (disconnect)
 void clif_parse_Restart(int32 fd, map_session_data *sd)
 {
+	if( pc_is_soul_revive_pending(sd) ){
+		clif_displaymessage(sd->fd, "You cannot restart while awaiting revival.");
+		return;
+	}
+
 	switch(RFIFOB(fd,packet_db[RFIFOW(fd,0)].pos[0])) {
 	case 0x00:
 		pc_respawn(sd,CLR_OUTSIGHT);

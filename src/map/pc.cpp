@@ -9679,10 +9679,21 @@ int32 pc_skillheal2_bonus(map_session_data *sd, uint16 skill_id) {
 	return bonus;
 }
 
+bool pc_is_soul_revive_pending(const map_session_data* sd)
+{
+	if( sd == nullptr || !pc_isdead(sd) || sd->soul_deadline_tid == INVALID_TIMER )
+		return false;
+
+	map_data* mapdata = map_getmapdata(sd->m);
+	return mapdata != nullptr && mapdata->getMapFlag(MF_AINCRAD);
+}
+
 void pc_respawn(map_session_data* sd, clr_type clrtype)
 {
 	if( !pc_isdead(sd) )
 		return; // not applicable
+	if( pc_is_soul_revive_pending(sd) )
+		return; // Lost Souls death window blocks normal restart/respawn bypass
 	if( sd->bg_id && bg_member_respawn(sd) )
 		return; // member revived by battleground
 
