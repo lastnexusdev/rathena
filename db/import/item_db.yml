@@ -1,0 +1,38 @@
+Header:
+  Type: ITEM_DB
+  Version: 3
+
+Body:
+  - Id: 602
+    AegisName: Wing_Of_Butterfly
+    Name: Butterfly Wing
+    Type: DelayConsume
+    Buy: 1000
+    Weight: 50
+    Flags:
+      BuyingStore: true
+    Script: |
+      getmapxy(.@map$, .@x, .@y, BL_PC);
+      RingOfReturnMap$ = .@map$;
+      RingOfReturnX = .@x;
+      RingOfReturnY = .@y;
+      itemskill "AL_TELEPORT",3;
+
+  - Id: 500001
+    AegisName: Ring_Of_Return
+    Name: Ring Of Return
+    Type: DelayConsume
+    Buy: 20
+    Weight: 100
+    Script: |
+      if (RingOfReturnMap$ == "") {
+        dispbottom "No Butterfly Wing return point is stored.";
+        end;
+      }
+      .@map$ = RingOfReturnMap$;
+      .@x = RingOfReturnX;
+      .@y = RingOfReturnY;
+      RingOfReturnMap$ = "";
+      RingOfReturnX = 0;
+      RingOfReturnY = 0;
+      warp .@map$, .@x, .@y;

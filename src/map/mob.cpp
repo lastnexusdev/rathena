@@ -86,6 +86,114 @@ MobSummonDatabase mob_summon_db;
 MobChatDatabase mob_chat_db;
 MapDropDatabase map_drop_db;
 
+
+struct s_mvp_solo_lockout {
+	int32 consecutive_kills;
+	time_t cooldown_until;
+};
+
+static std::unordered_map<uint32, s_mvp_solo_lockout> mvp_solo_lockouts;
+
+static map_session_data* mob_mvp_get_player_source( block_list* src ){
+	if( src == nullptr )
+		return nullptr;
+
+	switch( src->type ){
+		case BL_PC:
+			return BL_CAST(BL_PC, src);
+		case BL_HOM: {
+			homun_data* hd = BL_CAST(BL_HOM, src);
+			return hd != nullptr ? hd->master : nullptr;
+		}
+		case BL_MER: {
+			s_mercenary_data* mer = BL_CAST(BL_MER, src);
+			return mer != nullptr ? mer->master : nullptr;
+		}
+		case BL_PET: {
+			pet_data* pd = BL_CAST(BL_PET, src);
+			return pd != nullptr ? pd->master : nullptr;
+		}
+		case BL_ELEM: {
+			s_elemental_data* ele = BL_CAST(BL_ELEM, src);
+			return ele != nullptr ? ele->master : nullptr;
+		}
+		case BL_MOB: {
+			mob_data* md = BL_CAST(BL_MOB, src);
+			if( md != nullptr && md->special_state.ai && md->master_id )
+				return map_id2sd(md->master_id);
+			return nullptr;
+		}
+		default:
+			return nullptr;
+	}
+}
+
+static void mob_mvp_clear_lock( mob_data* md ){
+	md->mvp_lock_type = MVP_LOCK_NONE;
+	md->mvp_lock_char_id = 0;
+	md->mvp_lock_account_id = 0;
+	md->mvp_lock_party_id = 0;
+	md->mvp_lock_last_damage_tick = 0;
+}
+
+static bool mob_mvp_party_has_active_member( mob_data* md, int32 party_id ){
+	if( party_id == 0 )
+		return false;
+
+	struct s_mapiterator* iter = mapit_getallusers();
+	map_session_data* sd;
+	bool active = false;
+
+	for( sd = (TBL_PC*)mapit_first(iter); mapit_exists(iter); sd = (TBL_PC*)mapit_next(iter) ){
+		if( sd->status.party_id != party_id )
+			continue;
+		if( sd->m != md->m )
+			continue;
+		if( pc_isdead(sd) )
+			continue;
+
+		active = true;
+		break;
+	}
+
+	mapit_free(iter);
+	return active;
+}
+
+static bool mob_mvp_lock_holder_active( mob_data* md ){
+	switch( md->mvp_lock_type ){
+		case MVP_LOCK_PARTY:
+			return mob_mvp_party_has_active_member(md, md->mvp_lock_party_id);
+		case MVP_LOCK_SOLO: {
+			map_session_data* sd = map_charid2sd(md->mvp_lock_char_id);
+			if( sd == nullptr )
+				return false;
+			if( sd->m != md->m )
+				return false;
+			if( pc_isdead(sd) )
+				return false;
+			return true;
+		}
+		default:
+			return false;
+	}
+}
+
+static void mob_mvp_validate_lock( mob_data* md, t_tick tick ){
+	if( md->mvp_lock_type == MVP_LOCK_NONE )
+		return;
+
+	if( battle_config.mvp_lock_inactivity_timeout > 0 && md->mvp_lock_last_damage_tick > 0 ){
+		if( DIFF_TICK( tick, md->mvp_lock_last_damage_tick ) > battle_config.mvp_lock_inactivity_timeout ){
+			mob_mvp_clear_lock(md);
+			return;
+		}
+	}
+
+	if( !mob_mvp_lock_holder_active(md) )
+		mob_mvp_clear_lock(md);
+}
+
 /*==========================================
  * Local prototype declaration   (only required thing)
  *------------------------------------------*/
@@ -1200,6 +1308,7 @@ int32 mob_spawn (mob_data *md)
 		md->spotted_log[i] = 0;
 
 	md->dmglog.clear();
+	mob_mvp_clear_lock(md);
 
 	if (md->lootitems)
 		memset(md->lootitems, 0, sizeof(*md->lootitems));
@@ -2537,8 +2646,20 @@ void mob_process_drop_list(std::shared_ptr<s_item_drop_list>& list, bool loot)
 		dir = DIR_NORTH;
 
 	for (std::shared_ptr<s_item_drop>& ditem : list->items) {
+		int16 map_id = list->m;
+		int16 drop_x = list->x;
+		int16 drop_y = list->y;
+
+		if( ditem->owner_charid > 0 ){
+			map_session_data* owner = map_charid2sd(ditem->owner_charid);
+			if( owner != nullptr && owner->m == list->m ){
+				drop_x = owner->x;
+				drop_y = owner->y;
+			}
+		}
+
 		map_addflooritem(&ditem->item_data, ditem->item_data.amount,
-			list->m, list->x, list->y,
+			map_id, drop_x, drop_y,
 			list->first_charid, list->second_charid, list->third_charid, 4, ditem->mob_id, !loot, dir, BL_CHAR|BL_PET);
 		// The drop location loops between three locations: SE -> W -> N -> SE
 		if (dir <= DIR_NORTH)
@@ -2597,6 +2718,11 @@ static void mob_item_drop(mob_data *md, std::shared_ptr<s_item_drop_list>& dlist
 		test_autoloot = test_autoloot && sd->m == md->m
 		&& check_distance_blxy(sd, dlist->x, dlist->y, AUTOLOOT_DISTANCE);
 #endif
+	if( sd != nullptr )
+		ditem->owner_charid = sd->status.char_id;
+	else
+		ditem->owner_charid = dlist->first_charid;
+
 	if( test_autoloot ) {	//Autoloot.
 		struct party_data *p = party_search(sd->status.party_id);
 
@@ -2667,6 +2793,65 @@ TIMER_FUNC(mob_respawn){
 	if(!bl) return 0;
 	status_revive(bl, (uint8)data, 0);
 	return 1;
+}
+
+
+bool mob_mvp_damage_allowed( mob_data* md, block_list* src, int64 damage ){
+	if( md == nullptr )
+		return true;
+
+	if( !battle_config.mvp_lock_enable || md->get_bosstype() != BOSSTYPE_MVP )
+		return true;
+
+	if( src == nullptr )
+		return true;
+
+	t_tick tick = gettick();
+	mob_mvp_validate_lock(md, tick);
+
+	map_session_data* owner_sd = mob_mvp_get_player_source(src);
+	if( owner_sd == nullptr )
+		return true;
+
+	if( md->mvp_lock_type == MVP_LOCK_NONE ){
+		if( damage <= 0 )
+			return true;
+
+		if( src->type != BL_PC )
+			return false;
+
+		if( owner_sd->status.party_id != 0 ){
+			md->mvp_lock_type = MVP_LOCK_PARTY;
+			md->mvp_lock_party_id = owner_sd->status.party_id;
+			md->mvp_lock_char_id = 0;
+			md->mvp_lock_account_id = 0;
+		}else{
+			time_t now = time(nullptr);
+			auto it = mvp_solo_lockouts.find(owner_sd->status.account_id);
+			if( it != mvp_solo_lockouts.end() && it->second.cooldown_until > now )
+				return false;
+
+			md->mvp_lock_type = MVP_LOCK_SOLO;
+			md->mvp_lock_char_id = owner_sd->status.char_id;
+			md->mvp_lock_account_id = owner_sd->status.account_id;
+			md->mvp_lock_party_id = 0;
+		}
+
+		md->mvp_lock_last_damage_tick = tick;
+		return true;
+	}
+
+	bool allowed = false;
+	if( md->mvp_lock_type == MVP_LOCK_PARTY ){
+		allowed = owner_sd->status.party_id != 0 && owner_sd->status.party_id == md->mvp_lock_party_id;
+	}else if( md->mvp_lock_type == MVP_LOCK_SOLO ){
+		allowed = owner_sd->status.char_id == md->mvp_lock_char_id;
+	}
+
+	if( allowed && damage > 0 )
+		md->mvp_lock_last_damage_tick = tick;
+
+	return allowed;
 }
 
 void mob_log_damage(mob_data* md, block_list* src, int64 damage, int64 damage_tanked)
@@ -3542,6 +3727,17 @@ int32 mob_dead(mob_data *md, block_list *src, int32 type)
 		first_sd = nullptr;
 
 	rebirth =  ( md->sc.getSCE(SC_KAIZEL) || md->sc.getSCE(SC_ULTIMATE_S) || (md->sc.getSCE(SC_REBIRTH) && !md->state.rebirth) );
+
+	if( !rebirth && md->get_bosstype() == BOSSTYPE_MVP && battle_config.mvp_solo_kill_limit > 0 && md->mvp_lock_type == MVP_LOCK_SOLO && md->mvp_lock_account_id > 0 ) {
+		s_mvp_solo_lockout& entry = mvp_solo_lockouts[md->mvp_lock_account_id];
+		entry.consecutive_kills++;
+
+		if( entry.consecutive_kills >= battle_config.mvp_solo_kill_limit ) {
+			entry.consecutive_kills = 0;
+			entry.cooldown_until = time(nullptr) + battle_config.mvp_solo_cooldown;
+		}
+	}
+
 	if( !rebirth ) { // Only trigger event on final kill
 		if( src ) {
 			switch( src->type ) { //allowed type
@@ -3650,6 +3846,7 @@ int32 mob_dead(mob_data *md, block_list *src, int32 type)
 
 	if( !rebirth )
 		mob_setdelayspawn(md); //Set respawning.
+	mob_mvp_clear_lock(md);
 	return 3; //Remove from map.
 }
 
@@ -3667,6 +3864,7 @@ void mob_revive(mob_data *md, uint32 hp)
 	md->last_pcneartime = 0;
 	//We reset the damage log and then set the already lost damage as self damage so players don't get exp for it [Playtester]
 	md->dmglog.clear();
+	mob_mvp_clear_lock(md);
 	mob_log_damage(md, md, static_cast<int64>(md->status.max_hp - hp));
 	if (!md->prev){
 		if(map_addblock(md))
@@ -3848,6 +4046,7 @@ int32 mob_class_change (mob_data *md, int32 mob_id)
 
 	if (battle_config.monster_class_change_recover) {
 		md->dmglog.clear();
+		mob_mvp_clear_lock(md);
 	} else {
 		md->status.hp = md->status.max_hp*hp_rate/100;
 		if(md->status.hp < 1) md->status.hp = 1;

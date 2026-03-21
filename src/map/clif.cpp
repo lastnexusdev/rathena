@@ -11625,13 +11625,13 @@ void clif_parse_Emotion(int32 fd, map_session_data *sd){
 		return;
 	}
 
-	const PACKET_CZ_REQ_EMOTION* p = reinterpret_cast<PACKET_CZ_REQ_EMOTION*>( RFIFOP( fd, 0 ) );
+	uint8 emotion_id = RFIFOB( fd, packet_db[RFIFOW( fd, 0 )].pos[0] );
 
-	if( p->emotion_type >= ET_MAX ){
+	if( emotion_id >= ET_MAX ){
 		return;
 	}
 	
-	emotion_type emoticon = static_cast<emotion_type>( p->emotion_type );
+	emotion_type emoticon = static_cast<emotion_type>( emotion_id );
 
 	if (battle_config.basic_skill_check == 0 || pc_checkskill(sd, NV_BASIC) >= 2 || pc_checkskill(sd, SU_BASIC_SKILL) >= 1) {
 		if (emoticon == ET_CHAT_PROHIBIT) {// prevent use of the mute emote [Valaris]
@@ -11836,6 +11836,11 @@ void clif_parse_ActionRequest(int32 fd, map_session_data *sd)
 ///     1 = char-select (disconnect)
 void clif_parse_Restart(int32 fd, map_session_data *sd)
 {
+	if( pc_is_soul_revive_pending(sd) ){
+		clif_displaymessage(sd->fd, "You cannot restart while awaiting revival.");
+		return;
+	}
+
 	switch(RFIFOB(fd,packet_db[RFIFOW(fd,0)].pos[0])) {
 	case 0x00:
 		pc_respawn(sd,CLR_OUTSIGHT);

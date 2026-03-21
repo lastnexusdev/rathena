@@ -1,0 +1,5 @@
+// Card Combination Blacklist
+// card_id_1,card_id_2
+// Prevent these two cards from being inserted together into the same equipment.
+// Order does not matter.
+

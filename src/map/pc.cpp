@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <map>
+#include <unordered_set>
 
 #ifdef MAP_GENERATOR
 #include <fstream>
@@ -72,6 +73,23 @@ CaptchaDatabase captcha_db;
 const char *macro_allowed_answer_chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890";
 
 int32 pc_split_atoui(char* str, uint32* val, char sep, int32 max);
+
+static std::unordered_set<uint64> card_combo_blacklist;
+
+static uint64 pc_card_combo_key( t_itemid card_a, t_itemid card_b ){
+	if( card_a > card_b )
+		std::swap( card_a, card_b );
+
+	return ( static_cast<uint64>( card_a ) << 32 ) | static_cast<uint64>( card_b );
+}
+
+static bool pc_card_combo_is_blacklisted( t_itemid card_a, t_itemid card_b ){
+	if( card_a == 0 || card_b == 0 )
+		return false;
+
+	return card_combo_blacklist.find( pc_card_combo_key( card_a, card_b ) ) != card_combo_blacklist.end();
+}
+
 static inline bool pc_attendance_rewarded_today( map_session_data* sd );
 
 #define PVP_CALCRANK_INTERVAL 1000	// PVP calculation interval
@@ -2124,6 +2142,7 @@ bool pc_authok(map_session_data *sd, uint32 login_id2, time_t expiration_time, i
 	sd->pvp_timer = INVALID_TIMER;
 	sd->expiration_tid = INVALID_TIMER;
 	sd->autotrade_tid = INVALID_TIMER;
+	sd->soul_deadline_tid = INVALID_TIMER;
 	sd->respawn_tid = INVALID_TIMER;
 	sd->tid_queue_active = INVALID_TIMER;
 	sd->macro_detect.timer = INVALID_TIMER;
@@ -5600,6 +5619,18 @@ int32 pc_insert_card(map_session_data* sd, int32 idx_card, int32 idx_equip)
 	ARR_FIND( 0, item_eq->slots, i, sd->inventory.u.items_inventory[idx_equip].card[i] == 0 );
 	if( i == item_eq->slots )
 		return 0; // no free slots
+
+	for( uint8 slot = 0; slot < item_eq->slots; slot++ ){
+		t_itemid equipped_card = sd->inventory.u.items_inventory[idx_equip].card[slot];
+
+		if( equipped_card == 0 )
+			continue;
+
+		if( pc_card_combo_is_blacklisted( equipped_card, sd->inventory.u.items_inventory[idx_card].nameid ) ){
+			clif_displaymessage( sd->fd, "This card combination is blacklisted by the server." );
+			return 0;
+		}
+	}
 
 	// remember the card id to insert
 	nameid = sd->inventory.u.items_inventory[idx_card].nameid;
@@ -9648,10 +9679,21 @@ int32 pc_skillheal2_bonus(map_session_data *sd, uint16 skill_id) {
 	return bonus;
 }
 
+bool pc_is_soul_revive_pending(const map_session_data* sd)
+{
+	if( sd == nullptr || !pc_isdead(sd) || sd->soul_deadline_tid == INVALID_TIMER )
+		return false;
+
+	map_data* mapdata = map_getmapdata(sd->m);
+	return mapdata != nullptr && mapdata->getMapFlag(MF_AINCRAD);
+}
+
 void pc_respawn(map_session_data* sd, clr_type clrtype)
 {
 	if( !pc_isdead(sd) )
 		return; // not applicable
+	if( pc_is_soul_revive_pending(sd) )
+		return; // Lost Souls death window blocks normal restart/respawn bypass
 	if( sd->bg_id && bg_member_respawn(sd) )
 		return; // member revived by battleground
 
@@ -9783,6 +9825,11 @@ int32 pc_dead(map_session_data *sd,block_list *src)
 			status_percent_heal(sd, 100, 100);
 			clif_resurrection( *sd );
 			pc_setinvincibletimer( *sd );
+
+			if( sd->soul_deadline_tid != INVALID_TIMER ){
+				delete_timer( sd->soul_deadline_tid, pc_soul_deadline_timer );
+				sd->soul_deadline_tid = INVALID_TIMER;
+			}
 			sc_start(sd,sd,SC_STEELBODY,100,5,skill_get_time(MO_STEELBODY,5));
 			if(mapdata_flag_gvg2(mapdata))
 				pc_respawn_timer(INVALID_TIMER, gettick(), sd->id, 0);
@@ -9876,6 +9923,14 @@ int32 pc_dead(map_session_data *sd,block_list *src)
 	pc_setdead(sd);
 
 	clif_party_dead( *sd );
+
+	if( sd->soul_deadline_tid != INVALID_TIMER ){
+		delete_timer( sd->soul_deadline_tid, pc_soul_deadline_timer );
+		sd->soul_deadline_tid = INVALID_TIMER;
+	}
+
+	if( mapdata->getMapFlag(MF_AINCRAD) )
+		sd->soul_deadline_tid = add_timer( tick + 120000, pc_soul_deadline_timer, sd->id, 0 );
 
 	pc_setparam(sd, SP_PCDIECOUNTER, sd->die_counter+1);
 	pc_setparam(sd, SP_KILLERRID, src?src->id:0);
@@ -10144,6 +10199,11 @@ void pc_revive(map_session_data *sd,uint32 hp, uint32 sp, uint32 ap) {
 
 	pc_setstand(sd, true);
 	pc_setinvincibletimer( *sd );
+
+	if( sd->soul_deadline_tid != INVALID_TIMER ){
+		delete_timer( sd->soul_deadline_tid, pc_soul_deadline_timer );
+		sd->soul_deadline_tid = INVALID_TIMER;
+	}
 
 	if (sd->state.gmaster_flag && sd->guild) {
 		guild_guildaura_refresh(sd,GD_LEADERSHIP,guild_checkskill(sd->guild->guild,GD_LEADERSHIP));
@@ -14435,6 +14495,31 @@ static bool pc_readdb_job_noenter_map( char *str[], size_t columns, size_t curre
 	return true;
 }
 
+
+static bool pc_readdb_card_combo_blacklist( char *str[], size_t columns, size_t current ){
+	t_itemid card_a = static_cast<t_itemid>( strtoul( str[0], nullptr, 10 ) );
+	t_itemid card_b = static_cast<t_itemid>( strtoul( str[1], nullptr, 10 ) );
+
+	if( card_a == 0 || card_b == 0 ){
+		ShowError( "pc_readdb_card_combo_blacklist: Invalid card pair '%s,%s'.\n", str[0], str[1] );
+		return false;
+	}
+
+	if( !item_db.exists( card_a ) || itemdb_type( card_a ) != IT_CARD ){
+		ShowError( "pc_readdb_card_combo_blacklist: Item %u is not a card.\n", card_a );
+		return false;
+	}
+
+	if( !item_db.exists( card_b ) || itemdb_type( card_b ) != IT_CARD ){
+		ShowError( "pc_readdb_card_combo_blacklist: Item %u is not a card.\n", card_b );
+		return false;
+	}
+
+	card_combo_blacklist.insert( pc_card_combo_key( card_a, card_b ) );
+
+	return true;
+}
+
 const std::string PlayerStatPointDatabase::getDefaultLocation() {
 	return std::string(db_path) + "/statpoint.yml";
 }
@@ -14586,6 +14671,7 @@ void pc_readdb(void) {
 		
 	//reset
 	job_db.clear(); // job_info table
+	card_combo_blacklist.clear();
 
 #if defined(RENEWAL_DROP) || defined(RENEWAL_EXP)
 	penalty_db.load();
@@ -14610,6 +14696,7 @@ void pc_readdb(void) {
 		}
 
 		sv_readdb(dbsubpath2, "job_noenter_map.txt", ',', 3, 3, CLASS_COUNT, &pc_readdb_job_noenter_map, i > 0);
+		sv_readdb(dbsubpath2, "card_combo_blacklist.txt", ',', 2, 2, UINT16_MAX, &pc_readdb_card_combo_blacklist, i > 0);
 		aFree(dbsubpath1);
 		aFree(dbsubpath2);
 	}
@@ -14836,6 +14923,22 @@ TIMER_FUNC(pc_expiration_timer){
 
 	map_quit(sd);
 
+	return 0;
+}
+
+
+TIMER_FUNC(pc_soul_deadline_timer){
+	map_session_data *sd = map_id2sd(id);
+
+	if( !sd )
+		return 0;
+
+	sd->soul_deadline_tid = INVALID_TIMER;
+
+	if( !pc_isdead(sd) )
+		return 0;
+
+	npc_event_do_id("LOST_SOULS::OnSoulLost", sd->id);
 	return 0;
 }
 
@@ -16128,6 +16231,7 @@ void do_init_pc(void) {
 	add_timer_func_list(pc_spiritcharm_timer, "pc_spiritcharm_timer");
 	add_timer_func_list(pc_global_expiration_timer, "pc_global_expiration_timer");
 	add_timer_func_list(pc_expiration_timer, "pc_expiration_timer");
+	add_timer_func_list(pc_soul_deadline_timer, "pc_soul_deadline_timer");
 	add_timer_func_list(pc_autotrade_timer, "pc_autotrade_timer");
 	add_timer_func_list(pc_on_expire_active, "pc_on_expire_active");
 	add_timer_func_list(pc_macro_detector_timeout, "pc_macro_detector_timeout");
