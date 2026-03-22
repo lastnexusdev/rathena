@@ -90,6 +90,107 @@ static bool pc_card_combo_is_blacklisted( t_itemid card_a, t_itemid card_b ){
 	return card_combo_blacklist.find( pc_card_combo_key( card_a, card_b ) ) != card_combo_blacklist.end();
 }
 
+static constexpr t_itemid DUAL_CARD_BLANK = 900000;
+static constexpr t_itemid DUAL_CARD_WEAPON = 900001;
+static constexpr t_itemid DUAL_CARD_ARMOR = 900002;
+static constexpr t_itemid DUAL_CARD_SHIELD = 900003;
+static constexpr t_itemid DUAL_CARD_GARMENT = 900004;
+static constexpr t_itemid DUAL_CARD_SHOES = 900005;
+static constexpr t_itemid DUAL_CARD_HEADGEAR = 900006;
+static constexpr t_itemid DUAL_CARD_ACCESSORY = 900007;
+
+bool pc_is_dual_card_carrier(t_itemid nameid) {
+	return nameid >= DUAL_CARD_BLANK && nameid <= DUAL_CARD_ACCESSORY;
+}
+
+uint8 pc_dual_card_category_from_nameid(t_itemid nameid) {
+	switch (nameid) {
+		case DUAL_CARD_WEAPON: return DUAL_CARD_CATEGORY_WEAPON;
+		case DUAL_CARD_ARMOR: return DUAL_CARD_CATEGORY_ARMOR;
+		case DUAL_CARD_SHIELD: return DUAL_CARD_CATEGORY_SHIELD;
+		case DUAL_CARD_GARMENT: return DUAL_CARD_CATEGORY_GARMENT;
+		case DUAL_CARD_SHOES: return DUAL_CARD_CATEGORY_SHOES;
+		case DUAL_CARD_HEADGEAR: return DUAL_CARD_CATEGORY_HEADGEAR;
+		case DUAL_CARD_ACCESSORY: return DUAL_CARD_CATEGORY_ACCESSORY;
+		default: return DUAL_CARD_CATEGORY_NONE;
+	}
+}
+
+uint32 pc_dual_card_category_equip_mask(uint8 category) {
+	switch (category) {
+		case DUAL_CARD_CATEGORY_WEAPON: return EQP_WEAPON;
+		case DUAL_CARD_CATEGORY_ARMOR: return EQP_ARMOR;
+		case DUAL_CARD_CATEGORY_SHIELD: return EQP_SHIELD;
+		case DUAL_CARD_CATEGORY_GARMENT: return EQP_GARMENT;
+		case DUAL_CARD_CATEGORY_SHOES: return EQP_SHOES;
+		case DUAL_CARD_CATEGORY_HEADGEAR: return EQP_HEAD_TOP | EQP_HEAD_MID | EQP_HEAD_LOW;
+		case DUAL_CARD_CATEGORY_ACCESSORY: return EQP_ACC_L | EQP_ACC_R;
+		default: return 0;
+	}
+}
+
+bool pc_is_filled_dual_card_carrier(const struct item& item) {
+	return pc_dual_card_category_from_nameid(item.nameid) != DUAL_CARD_CATEGORY_NONE && item.card[0] > 0 && item.card[1] > 0;
+}
+
+bool pc_decode_dual_card_data(const struct item& item, t_itemid& card_a, t_itemid& card_b, uint8& category) {
+	card_a = 0;
+	card_b = 0;
+	category = DUAL_CARD_CATEGORY_NONE;
+
+	if (item.nameid != 0 && pc_is_filled_dual_card_carrier(item)) {
+		card_a = item.card[0];
+		card_b = item.card[1];
+		category = pc_dual_card_category_from_nameid(item.nameid);
+		return true;
+	}
+
+	if (item.card[0] != CARD0_DUAL)
+		return false;
+
+	card_a = item.card[1];
+	card_b = item.card[2];
+	category = static_cast<uint8>(item.card[3]);
+	return card_a != 0 && card_b != 0 && category != DUAL_CARD_CATEGORY_NONE;
+}
+
+uint8 pc_get_effective_card_count(const struct item& item) {
+	t_itemid card_a, card_b;
+	uint8 category;
+
+	if (pc_decode_dual_card_data(item, card_a, card_b, category))
+		return 2;
+
+	if (itemdb_isspecial(item.card[0]))
+		return 0;
+
+	uint8 count = 0;
+	for (uint8 i = 0; i < MAX_SLOTS; i++) {
+		if (item.card[i] != 0)
+			count++;
+	}
+
+	return count;
+}
+
+t_itemid pc_get_effective_card(const struct item& item, uint8 index) {
+	t_itemid card_a, card_b;
+	uint8 category;
+
+	if (pc_decode_dual_card_data(item, card_a, card_b, category)) {
+		if (index == 0)
+			return card_a;
+		if (index == 1)
+			return card_b;
+		return 0;
+	}
+
+	if (itemdb_isspecial(item.card[0]) || index >= MAX_SLOTS)
+		return 0;
+
+	return item.card[index];
+}
+
 static inline bool pc_attendance_rewarded_today( map_session_data* sd );
 
 #define PVP_CALCRANK_INTERVAL 1000	// PVP calculation interval
@@ -5616,12 +5717,45 @@ int32 pc_insert_card(map_session_data* sd, int32 idx_card, int32 idx_equip)
 	if( sd->inventory.u.items_inventory[idx_equip].equip != 0 )
 		return 0; // item must be unequipped
 
+	if( pc_is_dual_card_carrier( item_card->nameid ) ){
+		t_itemid card_a, card_b;
+		uint8 category = DUAL_CARD_CATEGORY_NONE;
+		uint32 category_mask = pc_dual_card_category_equip_mask( pc_dual_card_category_from_nameid( item_card->nameid ) );
+
+		if( !pc_decode_dual_card_data( sd->inventory.u.items_inventory[idx_card], card_a, card_b, category ) )
+			return 0; // blank carrier cards can not be compounded
+		if( category_mask == 0 || ( item_eq->equip & category_mask ) == 0 )
+			return 0; // carrier type mismatch
+		if( sd->inventory.u.items_inventory[idx_equip].card[0] != 0 )
+			return 0; // dual cards require an untouched slot layout
+		if( pc_card_combo_is_blacklisted( card_a, card_b ) ){
+			clif_displaymessage( sd->fd, "This card combination is blacklisted by the server." );
+			return 0;
+		}
+
+		nameid = item_card->nameid;
+
+		if( pc_delitem(sd,idx_card,1,1,0,LOG_TYPE_OTHER) == 1 ){
+			clif_insert_card( *sd, idx_equip, idx_card, true );
+		}else{
+			log_pick_pc(sd, LOG_TYPE_OTHER, -1, &sd->inventory.u.items_inventory[idx_equip]);
+			sd->inventory.u.items_inventory[idx_equip].card[0] = CARD0_DUAL;
+			sd->inventory.u.items_inventory[idx_equip].card[1] = card_a;
+			sd->inventory.u.items_inventory[idx_equip].card[2] = card_b;
+			sd->inventory.u.items_inventory[idx_equip].card[3] = category;
+			log_pick_pc(sd, LOG_TYPE_OTHER,  1, &sd->inventory.u.items_inventory[idx_equip]);
+			clif_insert_card( *sd, idx_equip, idx_card, false );
+		}
+
+		return 0;
+	}
+
 	ARR_FIND( 0, item_eq->slots, i, sd->inventory.u.items_inventory[idx_equip].card[i] == 0 );
 	if( i == item_eq->slots )
 		return 0; // no free slots
 
 	for( uint8 slot = 0; slot < item_eq->slots; slot++ ){
-		t_itemid equipped_card = sd->inventory.u.items_inventory[idx_equip].card[slot];
+		t_itemid equipped_card = pc_get_effective_card( sd->inventory.u.items_inventory[idx_equip], slot );
 
 		if( equipped_card == 0 )
 			continue;
@@ -12286,19 +12420,17 @@ bool pc_equipitem(map_session_data *sd,int16 n,int32 req_pos,bool equipswitch)
 	if (!id->combos.empty())
 		pc_checkcombo(sd, id);
 
-	if (itemdb_isspecial(sd->inventory.u.items_inventory[n].card[0]))
-		; // No cards
-	else {
-		for (i = 0; i < MAX_SLOTS; i++) {
-			if (!sd->inventory.u.items_inventory[n].card[i])
-				continue;
+	for (i = 0; i < MAX_SLOTS; i++) {
+		t_itemid effective_card = pc_get_effective_card(sd->inventory.u.items_inventory[n], i);
 
-			std::shared_ptr<item_data> data = item_db.find(sd->inventory.u.items_inventory[n].card[i]);
+		if (!effective_card)
+			continue;
 
-			if (data != nullptr) {
-				if (!data->combos.empty())
-					pc_checkcombo(sd, data.get());
-			}
+		std::shared_ptr<item_data> data = item_db.find(effective_card);
+
+		if (data != nullptr) {
+			if (!data->combos.empty())
+				pc_checkcombo(sd, data.get());
 		}
 	}
 
@@ -12313,22 +12445,20 @@ bool pc_equipitem(map_session_data *sd,int16 n,int32 req_pos,bool equipswitch)
 		//only run the script if item isn't restricted
 		if (id->equip_script && (pc_has_permission(sd,PC_PERM_USE_ALL_EQUIPMENT) || !itemdb_isNoEquip(id,sd->m)))
 			run_script(id->equip_script,0,sd->id,fake_nd->id);
-		if(itemdb_isspecial(sd->inventory.u.items_inventory[n].card[0]))
-			; //No cards
-		else {
-			for( i = 0; i < MAX_SLOTS; i++ ) {
-				if (!sd->inventory.u.items_inventory[n].card[i])
-					continue;
-				std::shared_ptr<item_data> data = item_db.find(sd->inventory.u.items_inventory[n].card[i]);
+		for( i = 0; i < MAX_SLOTS; i++ ) {
+			t_itemid effective_card = pc_get_effective_card(sd->inventory.u.items_inventory[n], i);
 
-				if ( data != nullptr ) {
-					if (data->equip_script && (pc_has_permission(sd,PC_PERM_USE_ALL_EQUIPMENT) || !itemdb_isNoEquip(data.get(), sd->m))) {
-						current_equip_card_id = sd->inventory.u.items_inventory[n].card[i];
-						run_script(data->equip_script,0,sd->id,fake_nd->id);
-					}
+			if (!effective_card)
+				continue;
+			std::shared_ptr<item_data> data = item_db.find(effective_card);
+
+			if ( data != nullptr ) {
+				if (data->equip_script && (pc_has_permission(sd,PC_PERM_USE_ALL_EQUIPMENT) || !itemdb_isNoEquip(data.get(), sd->m))) {
+					current_equip_card_id = effective_card;
+					run_script(data->equip_script,0,sd->id,fake_nd->id);
 				}
-				current_equip_card_id = 0;
 			}
+			current_equip_card_id = 0;
 		}
 		current_equip_item_index = -1;
 	}
@@ -12379,14 +12509,13 @@ static void pc_unequipitem_sub(map_session_data *sd, int32 n, int32 flag) {
 				status_calc = true;
 		}
 
-		if (itemdb_isspecial(sd->inventory.u.items_inventory[n].card[0]))
-			; // No cards
-		else {
 			for (i = 0; i < MAX_SLOTS; i++) {
-				if (!sd->inventory.u.items_inventory[n].card[i])
+				t_itemid effective_card = pc_get_effective_card(sd->inventory.u.items_inventory[n], i);
+
+				if (!effective_card)
 					continue;
 
-				std::shared_ptr<item_data> data = item_db.find(sd->inventory.u.items_inventory[n].card[i]);
+				std::shared_ptr<item_data> data = item_db.find(effective_card);
 
 				if (data != nullptr) {
 					if (!data->combos.empty()) {
@@ -12395,7 +12524,6 @@ static void pc_unequipitem_sub(map_session_data *sd, int32 n, int32 flag) {
 					}
 				}
 			}
-		}
 	}
 
 	if (flag & 1 || status_calc) {
@@ -12411,23 +12539,21 @@ static void pc_unequipitem_sub(map_session_data *sd, int32 n, int32 flag) {
 		current_equip_card_id = 0;
 		if (sd->inventory_data[n]->unequip_script)
 			run_script(sd->inventory_data[n]->unequip_script, 0, sd->id, fake_nd->id);
-		if (itemdb_isspecial(sd->inventory.u.items_inventory[n].card[0]))
-			; //No cards
-		else {
-			for (i = 0; i < MAX_SLOTS; i++) {
-				if (!sd->inventory.u.items_inventory[n].card[i])
-					continue;
+		for (i = 0; i < MAX_SLOTS; i++) {
+			t_itemid effective_card = pc_get_effective_card(sd->inventory.u.items_inventory[n], i);
 
-				std::shared_ptr<item_data> data = item_db.find(sd->inventory.u.items_inventory[n].card[i]);
+			if (!effective_card)
+				continue;
 
-				if (data != nullptr) {
-					if (data->unequip_script) {
-						current_equip_card_id = sd->inventory.u.items_inventory[n].card[i];
-						run_script(data->unequip_script, 0, sd->id, fake_nd->id);
-					}
+			std::shared_ptr<item_data> data = item_db.find(effective_card);
+
+			if (data != nullptr) {
+				if (data->unequip_script) {
+					current_equip_card_id = effective_card;
+					run_script(data->unequip_script, 0, sd->id, fake_nd->id);
 				}
-				current_equip_card_id = 0;
 			}
+			current_equip_card_id = 0;
 		}
 		current_equip_item_index = -1;
 	}

@@ -1,0 +1,174 @@
+//===== rAthena Script =======================================
+//= Dual Card Master
+//===== Description: =========================================
+//= Exchanges blank dual cards into category-specific carriers
+//= and combines two valid cards into a filled dual card.
+//============================================================
+
+prontera,152,182,4	script	Dual Card Master	100,{
+	.@blank = 900000;
+
+	mes "[Dual Card Master]";
+	mes "I can turn a ^0055FFDual Card Blank^000000 into the category you need, then merge two matching cards into it.";
+	next;
+
+	switch(select("Exchange blank card:Combine two cards:Cancel")) {
+	case 1:
+		if (countitem(.@blank) < 1) {
+			mes "[Dual Card Master]";
+			mes "Bring me a ^0055FFDual Card Blank^000000 first.";
+			close;
+		}
+
+		.@category = callsub(S_SelectCategory);
+		if (!.@category) close;
+
+		delitem .@blank,1;
+		getitem .carrier_id[.@category],1;
+
+		mes "[Dual Card Master]";
+		mes "Done. Use this category blank here again when you are ready to merge two cards.";
+		close;
+
+	case 2:
+		.@category = callsub(S_SelectCategory);
+		if (!.@category) close;
+
+		.@carrier = .carrier_id[.@category];
+		getinventorylist;
+
+		.@blank_idx = -1;
+		for (.@i = 0; .@i < @inventorylist_count; .@i++) {
+			if (@inventorylist_id[.@i] != .@carrier)
+				continue;
+			if (@inventorylist_card1[.@i] || @inventorylist_card2[.@i] || @inventorylist_card3[.@i] || @inventorylist_card4[.@i])
+				continue;
+			.@blank_idx = @inventorylist_idx[.@i];
+			break;
+		}
+
+		if (.@blank_idx < 0) {
+			mes "[Dual Card Master]";
+			mes "You need a blank ^0055FF" + getitemname(.@carrier) + "^000000 first.";
+			close;
+		}
+
+		deletearray .@card_id[0], getarraysize(.@card_id);
+		deletearray .@card_idx[0], getarraysize(.@card_idx);
+		deletearray .@card_name$[0], getarraysize(.@card_name$);
+		.@count = 0;
+
+		for (.@i = 0; .@i < @inventorylist_count; .@i++) {
+			.@item_id = @inventorylist_id[.@i];
+			if (getiteminfo(.@item_id, ITEMINFO_TYPE) != IT_CARD)
+				continue;
+			if (callsub(S_IsDualItem, .@item_id))
+				continue;
+			if (!callsub(S_IsMatchingCategoryCard, .@category, .@item_id))
+				continue;
+
+			.@card_id[.@count] = .@item_id;
+			.@card_idx[.@count] = @inventorylist_idx[.@i];
+			.@card_name$[.@count] = getitemname(.@item_id);
+			.@count++;
+		}
+
+		if (.@count < 2) {
+			mes "[Dual Card Master]";
+			mes "You need at least two valid cards for that category in your inventory.";
+			close;
+		}
+
+		.@menu$ = "";
+		for (.@i = 0; .@i < .@count; .@i++)
+			.@menu$ += .@card_name$[.@i] + ":";
+		mes "[Dual Card Master]";
+		mes "Pick the first card.";
+		.@first = select(.@menu$) - 1;
+		if (.@first < 0) close;
+		.@first_id = .@card_id[.@first];
+		.@first_idx = .@card_idx[.@first];
+
+		deletearray .@second_menu$[0], getarraysize(.@second_menu$);
+		deletearray .@second_id[0], getarraysize(.@second_id);
+		deletearray .@second_idx[0], getarraysize(.@second_idx);
+		.@second_count = 0;
+		for (.@i = 0; .@i < .@count; .@i++) {
+			if (.@card_idx[.@i] == .@first_idx)
+				continue;
+			.@second_menu$[.@second_count] = .@card_name$[.@i];
+			.@second_id[.@second_count] = .@card_id[.@i];
+			.@second_idx[.@second_count] = .@card_idx[.@i];
+			.@second_count++;
+		}
+
+		.@menu$ = "";
+		for (.@i = 0; .@i < .@second_count; .@i++)
+			.@menu$ += .@second_menu$[.@i] + ":";
+		mes "[Dual Card Master]";
+		mes "Pick the second card.";
+		.@second = select(.@menu$) - 1;
+		if (.@second < 0) close;
+
+		.@second_idx_selected = .@second_idx[.@second];
+
+		mes "[Dual Card Master]";
+		mes "Combine ^0055FF" + getitemname(.@first_id) + "^000000 and ^0055FF" + getitemname(.@second_id[.@second]) + "^000000 into ^0055FF" + getitemname(.@carrier) + "^000000?";
+		if (select("Yes:No") == 2)
+			close;
+
+		.@del_a = .@blank_idx;
+		.@del_b = .@first_idx;
+		.@del_c = .@second_idx_selected;
+		if (.@del_a < .@del_b) { .@swap = .@del_a; .@del_a = .@del_b; .@del_b = .@swap; }
+		if (.@del_b < .@del_c) { .@swap = .@del_b; .@del_b = .@del_c; .@del_c = .@swap; }
+		if (.@del_a < .@del_b) { .@swap = .@del_a; .@del_a = .@del_b; .@del_b = .@swap; }
+		delitemidx .@del_a,1;
+		delitemidx .@del_b,1;
+		delitemidx .@del_c,1;
+		getitem2 .@carrier,1,1,0,0,.@first_id,.@second_id[.@second],0,0;
+
+		mes "[Dual Card Master]";
+		mes "All set. Drag the filled dual card onto clean equipment of the same category to socket it.";
+		close;
+	}
+	end;
+
+S_SelectCategory:
+	mes "[Dual Card Master]";
+	mes "Choose the dual-card category you want.";
+	.@choice = select("Weapon:Armor:Shield:Garment:Shoes:Headgear:Accessory:Cancel");
+	if (.@choice == 8)
+		return 0;
+	return .@choice;
+
+S_IsDualItem:
+	.@item_id = getarg(0);
+	return (.@item_id >= 900000 && .@item_id <= 900007);
+
+S_IsMatchingCategoryCard:
+	.@category = getarg(0);
+	.@item_id = getarg(1);
+	.@loc = getiteminfo(.@item_id, ITEMINFO_LOCATIONS);
+
+	switch (.@category) {
+	case 1: return (.@loc == EQP_WEAPON);
+	case 2: return (.@loc == EQP_ARMOR);
+	case 3: return (.@loc == EQP_SHIELD);
+	case 4: return (.@loc == EQP_GARMENT);
+	case 5: return (.@loc == EQP_SHOES);
+	case 6: return ((.@loc & (EQP_HEAD_TOP|EQP_HEAD_MID|EQP_HEAD_LOW)) != 0) && ((.@loc & ~(EQP_HEAD_TOP|EQP_HEAD_MID|EQP_HEAD_LOW)) == 0);
+	case 7: return ((.@loc & (EQP_ACC_L|EQP_ACC_R)) != 0) && ((.@loc & ~(EQP_ACC_L|EQP_ACC_R)) == 0);
+	}
+	return 0;
+
+OnInit:
+	.carrier_id[1] = 900001;
+	.carrier_id[2] = 900002;
+	.carrier_id[3] = 900003;
+	.carrier_id[4] = 900004;
+	.carrier_id[5] = 900005;
+	.carrier_id[6] = 900006;
+	.carrier_id[7] = 900007;
+	end;
+}

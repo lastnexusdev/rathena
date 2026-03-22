@@ -32,10 +32,11 @@ const t_itemid UNKNOWN_ITEM_ID = 512;
 
 const t_itemid CARD0_FORGE = 0x00FF;
 const t_itemid CARD0_CREATE = 0x00FE;
+const t_itemid CARD0_DUAL = 0x00FD;
 const t_itemid CARD0_PET = 0x0100;
 
 ///Marks if the card0 given is "special" (non-item id used to mark pets/created items. [Skotlex]
-#define itemdb_isspecial(i) (i == CARD0_FORGE || i == CARD0_CREATE || i == CARD0_PET)
+#define itemdb_isspecial(i) (i == CARD0_FORGE || i == CARD0_CREATE || i == CARD0_DUAL || i == CARD0_PET)
 
 ///Enum of item id (for hardcoded purpose)
 enum item_itemid : t_itemid
