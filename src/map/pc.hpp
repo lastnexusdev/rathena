@@ -173,6 +173,17 @@ enum e_macro_report_status : uint8 {
 	MCR_INPROGRESS = 2,
 };
 
+enum e_dual_card_category : uint8 {
+	DUAL_CARD_CATEGORY_NONE = 0,
+	DUAL_CARD_CATEGORY_WEAPON = 1,
+	DUAL_CARD_CATEGORY_ARMOR = 2,
+	DUAL_CARD_CATEGORY_SHIELD = 3,
+	DUAL_CARD_CATEGORY_GARMENT = 4,
+	DUAL_CARD_CATEGORY_SHOES = 5,
+	DUAL_CARD_CATEGORY_HEADGEAR = 6,
+	DUAL_CARD_CATEGORY_ACCESSORY = 7,
+};
+
 class CaptchaDatabase : public TypesafeYamlDatabase<int16, s_captcha_data> {
 public:
 	CaptchaDatabase() : TypesafeYamlDatabase("CAPTCHA_DB", 1) {
@@ -184,6 +195,14 @@ public:
 };
 
 extern CaptchaDatabase captcha_db;
+
+bool pc_is_dual_card_carrier(t_itemid nameid);
+bool pc_is_filled_dual_card_carrier(const struct item& item);
+uint8 pc_dual_card_category_from_nameid(t_itemid nameid);
+uint32 pc_dual_card_category_equip_mask(uint8 category);
+bool pc_decode_dual_card_data(const struct item& item, t_itemid& card_a, t_itemid& card_b, uint8& category);
+uint8 pc_get_effective_card_count(const struct item& item);
+t_itemid pc_get_effective_card(const struct item& item, uint8 index);
 
 #ifdef VIP_ENABLE
 struct vip_info {

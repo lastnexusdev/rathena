@@ -1,0 +1,108 @@
+Header:
+  Type: ITEM_DB
+  Version: 3
+
+Body:
+  - Id: 900000
+    AegisName: Dual_Card_Blank
+    Name: Dual Card Blank
+    Type: Card
+    Weight: 10
+    Flags:
+      UniqueId: true
+    Trade:
+      NoDrop: true
+      NoTrade: true
+
+  - Id: 900001
+    AegisName: Dual_Slot_Card_Weapon
+    Name: Dual Slot Card [Weapon]
+    Type: Card
+    Weight: 10
+    Locations:
+      Weapon: true
+    Flags:
+      UniqueId: true
+    Trade:
+      NoDrop: true
+      NoTrade: true
+
+  - Id: 900002
+    AegisName: Dual_Slot_Card_Armor
+    Name: Dual Slot Card [Armor]
+    Type: Card
+    Weight: 10
+    Locations:
+      Armor: true
+    Flags:
+      UniqueId: true
+    Trade:
+      NoDrop: true
+      NoTrade: true
+
+  - Id: 900003
+    AegisName: Dual_Slot_Card_Shield
+    Name: Dual Slot Card [Shield]
+    Type: Card
+    Weight: 10
+    Locations:
+      Left_Hand: true
+    Flags:
+      UniqueId: true
+    Trade:
+      NoDrop: true
+      NoTrade: true
+
+  - Id: 900004
+    AegisName: Dual_Slot_Card_Garment
+    Name: Dual Slot Card [Garment]
+    Type: Card
+    Weight: 10
+    Locations:
+      Garment: true
+    Flags:
+      UniqueId: true
+    Trade:
+      NoDrop: true
+      NoTrade: true
+
+  - Id: 900005
+    AegisName: Dual_Slot_Card_Shoes
+    Name: Dual Slot Card [Shoes]
+    Type: Card
+    Weight: 10
+    Locations:
+      Shoes: true
+    Flags:
+      UniqueId: true
+    Trade:
+      NoDrop: true
+      NoTrade: true
+
+  - Id: 900006
+    AegisName: Dual_Slot_Card_Headgear
+    Name: Dual Slot Card [Headgear]
+    Type: Card
+    Weight: 10
+    Locations:
+      Head_Top: true
+      Head_Mid: true
+      Head_Low: true
+    Flags:
+      UniqueId: true
+    Trade:
+      NoDrop: true
+      NoTrade: true
+
+  - Id: 900007
+    AegisName: Dual_Slot_Card_Accessory
+    Name: Dual Slot Card [Accessory]
+    Type: Card
+    Weight: 10
+    Locations:
+      Both_Accessory: true
+    Flags:
+      UniqueId: true
+    Trade:
+      NoDrop: true
+      NoTrade: true

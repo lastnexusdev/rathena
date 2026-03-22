@@ -2776,6 +2776,15 @@ static void clif_addcards( struct EQUIPSLOTINFO* buf, const item* item ){
 		return;
 	}
 
+	// Dual-card encoded equipment
+	if( item->card[0] == CARD0_DUAL ){
+		buf->card[0] = 0;
+		buf->card[1] = 0;
+		buf->card[2] = 0;
+		buf->card[3] = 0;
+		return;
+	}
+
 	// Forged/created items
 	if( item->card[0] == CARD0_FORGE || item->card[0] == CARD0_CREATE ){
 		buf->card[0] = item->card[0];

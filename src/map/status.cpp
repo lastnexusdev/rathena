@@ -4115,14 +4115,12 @@ int32 status_calc_pc_sub(map_session_data* sd, uint8 opt)
 		if (sd->inventory_data[index]) {
 			int32 j;
 
-			// Card script execution.
-			if (itemdb_isspecial(sd->inventory.u.items_inventory[index].card[0]))
-				continue;
-			for (j = 0; j < MAX_SLOTS; j++) { // Uses MAX_SLOTS to support Soul Bound system [Inkfish]
-				int32 c = sd->inventory.u.items_inventory[index].card[j];
-				current_equip_card_id= c;
-				if(!c)
-					continue;
+				// Card script execution.
+				for (j = 0; j < MAX_SLOTS; j++) { // Uses MAX_SLOTS to support Soul Bound system [Inkfish]
+					int32 c = pc_get_effective_card(sd->inventory.u.items_inventory[index], j);
+					current_equip_card_id= c;
+					if(!c)
+						continue;
 
 				std::shared_ptr<item_data> data = item_db.find(c);
 
