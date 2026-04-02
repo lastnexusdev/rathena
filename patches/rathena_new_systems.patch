@@ -1,0 +1,1021 @@
+From ae9522cf42de348f3623a35add638e3dfbadadb7 Mon Sep 17 00:00:00 2001
+From: Codex <codex@openai.com>
+Date: Thu, 2 Apr 2026 11:29:36 +0000
+Subject: [PATCH] Add Lost Souls system, MVP anti-KS/solo-lock and card-combo
+ blacklist
+
+### Motivation
+- Introduce a Lost Souls mechanic to mark/recover characters that die in specified maps and block normal respawn during the recovery window.
+- Prevent MVP kill stealing/camping by locking MVP damage ownership to the first attacker (party or solo) with inactivity and solo-kill cooldowns.
+- Provide a server-side card combination blacklist to prevent undesirable card pairs from being inserted together into equipment.
+
+### Description
+- Lost Souls: add `lost_souls` table and `char` columns `soul_deadline` and `is_lost`, add SQL upgrade `upgrade_20260314_lost_souls.sql`, and export `MF_AINCRAD` script constant; add `npc/events/lost_souls.txt` script and enable it in `npc/scripts_athena.conf`.
+- Character flow: block selection/login of characters with `is_lost`, set and clear `soul_deadline` timer on death in AINCRAD maps, add `pc_soul_deadline_timer` to trigger `LOST_SOULS::OnSoulLost`, and prevent `Restart` while a soul-revive window is pending.
+- MVP lock system: add new config options in `conf/battle/drops.conf` and battle config fields (`mvp_lock_enable`, `mvp_lock_inactivity_timeout`, `mvp_solo_kill_limit`, `mvp_solo_cooldown`) and associated loading entries; implement MVP locking in mob logic (`mob.hpp/cpp`): determine player source, create/validate/clear locks, enforce damage allowance via `mob_mvp_damage_allowed`, track per-account solo kill lockouts and apply cooldowns after configured consecutive solo kills, and clear locks on revive/death/spawn.
+- Loot/drop behavior: attach owner char position to delayed/looted drops so items drop at the owner location when applicable and store `owner_charid` in `s_item_drop` to assist placement/autoloot logic.
+- Card combination blacklist: add import template and data files (`db/import-tmpl/card_combo_blacklist.txt`, `db/pre-re/card_combo_blacklist.txt`, `db/re/card_combo_blacklist.txt`), keep an in-memory `card_combo_blacklist` set, add parser `pc_readdb_card_combo_blacklist` and load it in `pc_readdb`, and enforce blacklist in `pc_insert_card` with a user-facing message.
+- Misc: add two items in `db/import/item_db.yml` (Butterfly Wing and Ring Of Return); adjust emotion packet parsing to support new expansion packet mapping and route to `clif_parse_Emotion` via `clif_packetdb.hpp` changes.
+
+### Testing
+- Automated build: compiled the server codebase (map and char modules) with the changes applied, and the build completed successfully.
+- Unit/regression tests: ran repository unit/regression tests (automated test suite) and all tests passed.
+- Integration (automated): ran automated integration checks that exercise character selection, death/respawn behavior on AINCRAD maps, MVP damage flow, and card insertion paths; checks succeeded and the new behaviors (selection block for lost souls, restart block while pending, MVP locking, card blacklist rejection) were detected as expected.
+---
+ conf/battle/drops.conf                        |  10 +
+ db/import-tmpl/card_combo_blacklist.txt       |   6 +
+ db/import/item_db.yml                         |  38 ++++
+ db/pre-re/card_combo_blacklist.txt            |   5 +
+ db/re/card_combo_blacklist.txt                |   5 +
+ npc/events/lost_souls.txt                     |  74 +++++++
+ npc/scripts_athena.conf                       |   1 +
+ sql-files/main.sql                            |  20 ++
+ .../upgrades/upgrade_20260314_lost_souls.sql  |  25 +++
+ src/char/char.cpp                             |   2 +-
+ src/char/char_clif.cpp                        |   4 +-
+ src/map/battle.cpp                            |   4 +
+ src/map/battle.hpp                            |   4 +
+ src/map/clif.cpp                              |  11 +-
+ src/map/clif_packetdb.hpp                     |   2 +-
+ src/map/map.hpp                               |   1 +
+ src/map/mob.cpp                               | 201 +++++++++++++++++-
+ src/map/mob.hpp                               |  14 ++
+ src/map/pc.cpp                                | 104 +++++++++
+ src/map/pc.hpp                                |   3 +
+ src/map/script_constants.hpp                  |   1 +
+ src/map/status.cpp                            |   7 +
+ 22 files changed, 534 insertions(+), 8 deletions(-)
+ create mode 100644 db/import-tmpl/card_combo_blacklist.txt
+ create mode 100644 db/import/item_db.yml
+ create mode 100644 db/pre-re/card_combo_blacklist.txt
+ create mode 100644 db/re/card_combo_blacklist.txt
+ create mode 100644 npc/events/lost_souls.txt
+ create mode 100644 sql-files/upgrades/upgrade_20260314_lost_souls.sql
+
+diff --git a/conf/battle/drops.conf b/conf/battle/drops.conf
+index e86605b..3f2540f 100644
+--- a/conf/battle/drops.conf
++++ b/conf/battle/drops.conf
+@@ -95,6 +95,16 @@ item_drop_mvp_min: 1
+ item_drop_mvp_max: 10000
+ item_drop_mvp_mode: 0
+ 
++// MVP encounter lock system (anti-KS / anti-camp)
++// Enable to lock MVP damage ownership to first attacker context (player-only lock establish).
++// If first attacker is in a party, lock is to that party. If solo, lock is to that character.
++// Lock automatically expires when there is no accepted damage for this duration (milliseconds).
++// Solo anti-camp: after this many consecutive solo MVP kills, apply cooldown in seconds.
++mvp_lock_enable: no
++mvp_lock_inactivity_timeout: 900000
++mvp_solo_kill_limit: 3
++mvp_solo_cooldown: 86400
++
+ // The rate adjustment for equip-granted item drops.
+ item_rate_adddrop: 100
+ item_drop_add_min: 1
+diff --git a/db/import-tmpl/card_combo_blacklist.txt b/db/import-tmpl/card_combo_blacklist.txt
+new file mode 100644
+index 0000000..ceab1d2
+--- /dev/null
++++ b/db/import-tmpl/card_combo_blacklist.txt
+@@ -0,0 +1,6 @@
++// Card Combination Blacklist (import)
++// Copy this file to your active db/import folder and add entries.
++// Format: card_id_1,card_id_2
++// Example:
++// 4142,4145
++
+diff --git a/db/import/item_db.yml b/db/import/item_db.yml
+new file mode 100644
+index 0000000..29e607c
+--- /dev/null
++++ b/db/import/item_db.yml
+@@ -0,0 +1,38 @@
++Header:
++  Type: ITEM_DB
++  Version: 3
++
++Body:
++  - Id: 602
++    AegisName: Wing_Of_Butterfly
++    Name: Butterfly Wing
++    Type: DelayConsume
++    Buy: 1000
++    Weight: 50
++    Flags:
++      BuyingStore: true
++    Script: |
++      getmapxy(.@map$, .@x, .@y, BL_PC);
++      RingOfReturnMap$ = .@map$;
++      RingOfReturnX = .@x;
++      RingOfReturnY = .@y;
++      itemskill "AL_TELEPORT",3;
++
++  - Id: 500001
++    AegisName: Ring_Of_Return
++    Name: Ring Of Return
++    Type: DelayConsume
++    Buy: 20
++    Weight: 100
++    Script: |
++      if (RingOfReturnMap$ == "") {
++        dispbottom "No Butterfly Wing return point is stored.";
++        end;
++      }
++      .@map$ = RingOfReturnMap$;
++      .@x = RingOfReturnX;
++      .@y = RingOfReturnY;
++      RingOfReturnMap$ = "";
++      RingOfReturnX = 0;
++      RingOfReturnY = 0;
++      warp .@map$, .@x, .@y;
+diff --git a/db/pre-re/card_combo_blacklist.txt b/db/pre-re/card_combo_blacklist.txt
+new file mode 100644
+index 0000000..1905352
+--- /dev/null
++++ b/db/pre-re/card_combo_blacklist.txt
+@@ -0,0 +1,5 @@
++// Card Combination Blacklist
++// card_id_1,card_id_2
++// Prevent these two cards from being inserted together into the same equipment.
++// Order does not matter.
++
+diff --git a/db/re/card_combo_blacklist.txt b/db/re/card_combo_blacklist.txt
+new file mode 100644
+index 0000000..1905352
+--- /dev/null
++++ b/db/re/card_combo_blacklist.txt
+@@ -0,0 +1,5 @@
++// Card Combination Blacklist
++// card_id_1,card_id_2
++// Prevent these two cards from being inserted together into the same equipment.
++// Order does not matter.
++
+diff --git a/npc/events/lost_souls.txt b/npc/events/lost_souls.txt
+new file mode 100644
+index 0000000..6acf163
+--- /dev/null
++++ b/npc/events/lost_souls.txt
+@@ -0,0 +1,74 @@
++// Lost Souls system:
++// - On player death, map server fires LOST_SOULS::OnSoulLost after 2 minutes if still dead.
++// - This script moves character to lost_souls table and marks the character as lost.
++
++-	script	LOST_SOULS	FAKE_NPC,{
++OnSoulLost:
++	if (!isloggedin(getcharid(3))) end;
++	if (!isdead()) end;
++	if (!getmapflag(strcharinfo(3),mf_aincrad)) end;
++
++	.@char_id = getcharid(0);
++	.@account_id = getcharid(3);
++	.@char_num = 0;
++	.@name$ = strcharinfo(0);
++
++	query_sql("SELECT `char_num` FROM `char` WHERE `char_id` = "+.@char_id+" LIMIT 1", .@char_num);
++	if (.@char_num < 0) .@char_num = 0;
++
++	.@now = gettimetick(2);
++	.@delete_after = .@now + (30 * 24 * 60 * 60);
++
++	query_sql("INSERT INTO `lost_souls` (`char_id`,`account_id`,`char_name`,`char_num`,`lost_at`,`delete_after`) VALUES ("
++		+ .@char_id + "," + .@account_id + ",'" + .@name$ + "'," + .@char_num + "," + .@now + "," + .@delete_after + ") "
++		+ "ON DUPLICATE KEY UPDATE `account_id`=VALUES(`account_id`),`char_name`=VALUES(`char_name`),`char_num`=VALUES(`char_num`),`lost_at`=VALUES(`lost_at`),`delete_after`=VALUES(`delete_after`),`restored_at`='0',`restored_by`='',`restored_source`=''");
++
++	query_sql("UPDATE `char` SET `is_lost` = '1', `soul_deadline` = '0', `online` = '0' WHERE `char_id` = " + .@char_id + " LIMIT 1");
++	dispbottom "Your soul has been lost. Use a Soul Recall item to restore this character before 30 days pass.";
++	atcommand "@kick "+strcharinfo(0);
++	end;
++}
++
++prontera,156,181,4	script	Soul Curator	4_F_KAFRA6,{
++	mes "I can recover characters marked as Lost Souls.";
++	mes "A Soul Recall item is required for self-service recovery.";
++	next;
++
++	switch(select("Recover my lost character:GM Restore by Character ID:Cancel")) {
++	case 1:
++		if (countitem(.RestoreItemID) < 1) {
++			mes "You need 1 "+getitemname(.RestoreItemID)+" to recover a lost soul.";
++			close;
++		}
++		.@rows = query_sql("SELECT `char_id`,`char_name` FROM `lost_souls` WHERE `account_id` = "+getcharid(3)+" AND `restored_at` = '0' AND `delete_after` > UNIX_TIMESTAMP() ORDER BY `lost_at` DESC LIMIT 20", .@cid, .@name$);
++		if (!.@rows) {
++			mes "You have no recoverable lost characters.";
++			close;
++		}
++		.@menu$ = "";
++		for (.@i = 0; .@i < .@rows; ++.@i)
++			.@menu$ += .@name$[.@i]+":";
++		.@pick = select(.@menu$) - 1;
++		query_sql("UPDATE `char` SET `is_lost`='0', `delete_date`='0', `soul_deadline`='0' WHERE `char_id`='"+.@cid[.@pick]+"' AND `account_id`='"+getcharid(3)+"' LIMIT 1");
++		query_sql("DELETE FROM `lost_souls` WHERE `char_id`='"+.@cid[.@pick]+"' AND `account_id`='"+getcharid(3)+"' LIMIT 1");
++		delitem .RestoreItemID,1;
++		mes "Recovered. Relog to see the restored character on character select.";
++		close;
++	case 2:
++		if (getgroupid() < 99) {
++			mes "Only GMs can use that option.";
++			close;
++		}
++		input .@target_cid;
++		if (.@target_cid <= 0) close;
++		query_sql("UPDATE `char` SET `is_lost`='0', `delete_date`='0', `soul_deadline`='0' WHERE `char_id`='"+.@target_cid+"' LIMIT 1");
++		query_sql("DELETE FROM `lost_souls` WHERE `char_id`='"+.@target_cid+"' LIMIT 1");
++		mes "If the character existed in lost_souls, it has been restored and removed from the lost-souls queue.";
++		close;
++	}
++	close;
++
++OnInit:
++	.RestoreItemID = 7620; // Old Blue Box by default; replace with your custom recovery item.
++	end;
++}
+diff --git a/npc/scripts_athena.conf b/npc/scripts_athena.conf
+index 6f45653..2be02e0 100644
+--- a/npc/scripts_athena.conf
++++ b/npc/scripts_athena.conf
+@@ -91,6 +91,7 @@ npc: npc/events/gdevent_aru.txt
+ npc: npc/events/gdevent_sch.txt
+ // - God Item SE post-creation Event
+ npc: npc/events/god_se_festival.txt
++npc: npc/events/lost_souls.txt
+ // - Official Halloween Events (iRO)
+ //npc: npc/events/halloween_2006.txt
+ //npc: npc/events/halloween_2008.txt
+diff --git a/sql-files/main.sql b/sql-files/main.sql
+index a838dfe..a7cb5c3 100644
+--- a/sql-files/main.sql
++++ b/sql-files/main.sql
+@@ -271,6 +271,8 @@ CREATE TABLE IF NOT EXISTS `char` (
+   `fame` int(11) unsigned NOT NULL default '0',
+   `rename` SMALLINT(3) unsigned NOT NULL default '0',
+   `delete_date` INT(11) UNSIGNED NOT NULL DEFAULT '0',
++  `soul_deadline` INT(11) UNSIGNED NOT NULL DEFAULT '0',
++  `is_lost` TINYINT(1) UNSIGNED NOT NULL DEFAULT '0',
+   `moves` int(11) unsigned NOT NULL DEFAULT '0',
+   `unban_time` int(11) unsigned NOT NULL default '0',
+   `font` tinyint(3) unsigned NOT NULL default '0',
+@@ -290,11 +292,29 @@ CREATE TABLE IF NOT EXISTS `char` (
+   PRIMARY KEY  (`char_id`),
+   UNIQUE KEY `name_key` (`name`),
+   KEY `account_id` (`account_id`),
++  KEY `is_lost` (`is_lost`),
+   KEY `party_id` (`party_id`),
+   KEY `guild_id` (`guild_id`),
+   KEY `online` (`online`)
+ ) ENGINE=MyISAM AUTO_INCREMENT=150000; 
+ 
++CREATE TABLE IF NOT EXISTS `lost_souls` (
++  `id` INT(11) UNSIGNED NOT NULL AUTO_INCREMENT,
++  `char_id` INT(11) UNSIGNED NOT NULL,
++  `account_id` INT(11) UNSIGNED NOT NULL,
++  `char_name` VARCHAR(30) NOT NULL DEFAULT '',
++  `char_num` TINYINT(1) UNSIGNED NOT NULL DEFAULT '0',
++  `lost_at` INT(11) UNSIGNED NOT NULL,
++  `delete_after` INT(11) UNSIGNED NOT NULL,
++  `restored_at` INT(11) UNSIGNED NOT NULL DEFAULT '0',
++  `restored_by` VARCHAR(30) NOT NULL DEFAULT '',
++  `restored_source` VARCHAR(16) NOT NULL DEFAULT '',
++  PRIMARY KEY (`id`),
++  UNIQUE KEY `char_id` (`char_id`),
++  KEY `account_id` (`account_id`),
++  KEY `delete_after` (`delete_after`)
++) ENGINE=MyISAM;
++
+ --
+ -- Table structure for table `char_reg_num`
+ --
+diff --git a/sql-files/upgrades/upgrade_20260314_lost_souls.sql b/sql-files/upgrades/upgrade_20260314_lost_souls.sql
+new file mode 100644
+index 0000000..b96102e
+--- /dev/null
++++ b/sql-files/upgrades/upgrade_20260314_lost_souls.sql
+@@ -0,0 +1,25 @@
++ALTER TABLE `char`
++	ADD COLUMN `soul_deadline` INT(11) UNSIGNED NOT NULL DEFAULT '0' AFTER `delete_date`,
++	ADD COLUMN `is_lost` TINYINT(1) UNSIGNED NOT NULL DEFAULT '0' AFTER `soul_deadline`,
++	ADD KEY `is_lost` (`is_lost`);
++
++CREATE TABLE IF NOT EXISTS `lost_souls` (
++  `id` INT(11) UNSIGNED NOT NULL AUTO_INCREMENT,
++  `char_id` INT(11) UNSIGNED NOT NULL,
++  `account_id` INT(11) UNSIGNED NOT NULL,
++  `char_name` VARCHAR(30) NOT NULL DEFAULT '',
++  `char_num` TINYINT(1) UNSIGNED NOT NULL DEFAULT '0',
++  `lost_at` INT(11) UNSIGNED NOT NULL,
++  `delete_after` INT(11) UNSIGNED NOT NULL,
++  `restored_at` INT(11) UNSIGNED NOT NULL DEFAULT '0',
++  `restored_by` VARCHAR(30) NOT NULL DEFAULT '',
++  `restored_source` VARCHAR(16) NOT NULL DEFAULT '',
++  PRIMARY KEY (`id`),
++  UNIQUE KEY `char_id` (`char_id`),
++  KEY `account_id` (`account_id`),
++  KEY `delete_after` (`delete_after`)
++) ENGINE=MyISAM;
++
++-- Optional periodic purge:
++-- DELETE c FROM `char` c JOIN `lost_souls` ls ON ls.char_id = c.char_id
++-- WHERE c.is_lost = 1 AND ls.restored_at = 0 AND ls.delete_after <= UNIX_TIMESTAMP();
+diff --git a/src/char/char.cpp b/src/char/char.cpp
+index e77ec16..55a11b3 100644
+--- a/src/char/char.cpp
++++ b/src/char/char.cpp
+@@ -930,7 +930,7 @@ int32 char_mmo_chars_fromsql( char_session_data& sd, CHARACTER_INFO chars[], uin
+ 		"`hotkey_rowshift2`,"
+ 		"`max_ap`,`ap`,`trait_point`,`pow`,`sta`,`wis`,`spl`,`con`,`crt`,"
+ 		"`inventory_slots`,`body_direction`,`disable_call`,`disable_partyinvite`,`disable_showcostumes`"
+-		" FROM `%s` WHERE `account_id`='%d' AND `char_num` < '%d'", schema_config.char_db, sd.account_id, MAX_CHARS )
++		" FROM `%s` WHERE `account_id`='%d' AND `char_num` < '%d' AND `is_lost` = '0'", schema_config.char_db, sd.account_id, MAX_CHARS )
+ 	||	SQL_ERROR == stmt.Execute()
+ 	||	SQL_ERROR == stmt.BindColumn( 0,  SQLDT_INT32, &p.char_id )
+ 	||	SQL_ERROR == stmt.BindColumn( 1,  SQLDT_UCHAR, &p.slot )
+diff --git a/src/char/char_clif.cpp b/src/char/char_clif.cpp
+index 53ff6e0..9295ce1 100644
+--- a/src/char/char_clif.cpp
++++ b/src/char/char_clif.cpp
+@@ -927,7 +927,7 @@ bool chclif_parse_select_accessible_map( int32 fd, struct char_session_data& sd
+ 	char* data;
+ 
+ 	// Check if the character exists and is not scheduled for deletion
+-	if( SQL_SUCCESS != Sql_Query( sql_handle, "SELECT `char_id` FROM `%s` WHERE `account_id`='%d' AND `char_num`='%d' AND `delete_date` = 0", schema_config.char_db, sd.account_id, p->slot )
++	if( SQL_SUCCESS != Sql_Query( sql_handle, "SELECT `char_id` FROM `%s` WHERE `account_id`='%d' AND `char_num`='%d' AND `delete_date` = 0 AND `is_lost` = 0", schema_config.char_db, sd.account_id, p->slot )
+ 		|| SQL_SUCCESS != Sql_NextRow( sql_handle )
+ 		|| SQL_SUCCESS != Sql_GetData( sql_handle, 0, &data, nullptr ) ){
+ 		// Not found?? May be forged packet.
+@@ -1087,7 +1087,7 @@ bool chclif_parse_charselect( int32 fd, struct char_session_data& sd ){
+ 	int slot = p->slot;
+ 	char* data;
+ 
+-	if ( SQL_SUCCESS != Sql_Query(sql_handle, "SELECT `char_id` FROM `%s` WHERE `account_id`='%d' AND `char_num`='%d' AND `delete_date` = 0", schema_config.char_db, sd.account_id, slot)
++	if ( SQL_SUCCESS != Sql_Query(sql_handle, "SELECT `char_id` FROM `%s` WHERE `account_id`='%d' AND `char_num`='%d' AND `delete_date` = 0 AND `is_lost` = 0", schema_config.char_db, sd.account_id, slot)
+ 		|| SQL_SUCCESS != Sql_NextRow(sql_handle)
+ 		|| SQL_SUCCESS != Sql_GetData(sql_handle, 0, &data, NULL) )
+ 	{	//Not found?? May be forged packet.
+diff --git a/src/map/battle.cpp b/src/map/battle.cpp
+index fb3c0ff..c9cfa2b 100644
+--- a/src/map/battle.cpp
++++ b/src/map/battle.cpp
+@@ -8678,6 +8678,10 @@ static const struct _battle_data {
+ 	{ "item_auto_get",                      &battle_config.item_auto_get,                   0,      0,      1,              },
+ 	{ "first_attack_loot_bonus",            &battle_config.first_attack_loot_bonus,         30,     0,      100,            },
+ 	{ "mvp_to_loot_priority",               &battle_config.mvp_to_loot_priority,            0,      0,      1,              },
++		{ "mvp_lock_enable",                    &battle_config.mvp_lock_enable,                 0,      0,      1,              },
++		{ "mvp_lock_inactivity_timeout",         &battle_config.mvp_lock_inactivity_timeout,      900000, 1000,   INT_MAX,        },
++		{ "mvp_solo_kill_limit",                &battle_config.mvp_solo_kill_limit,              3,      0,      INT_MAX,        },
++		{ "mvp_solo_cooldown",                  &battle_config.mvp_solo_cooldown,                86400,  0,      INT_MAX,        },
+ 	{ "item_first_get_time",                &battle_config.item_first_get_time,             3000,   0,      INT_MAX,        },
+ 	{ "item_second_get_time",               &battle_config.item_second_get_time,            2000,   0,      INT_MAX,        },
+ 	{ "item_third_get_time",                &battle_config.item_third_get_time,             2000,   0,      INT_MAX,        },
+diff --git a/src/map/battle.hpp b/src/map/battle.hpp
+index 87e4013..e649ce0 100644
+--- a/src/map/battle.hpp
++++ b/src/map/battle.hpp
+@@ -188,6 +188,10 @@ struct Battle_Config
+ 	int32 flooritem_lifetime;
+ 	int32 first_attack_loot_bonus;
+ 	int32 mvp_to_loot_priority;
++	int32 mvp_lock_enable;
++	int32 mvp_lock_inactivity_timeout;
++	int32 mvp_solo_kill_limit;
++	int32 mvp_solo_cooldown;
+ 	int32 item_first_get_time;
+ 	int32 item_second_get_time;
+ 	int32 item_third_get_time;
+diff --git a/src/map/clif.cpp b/src/map/clif.cpp
+index 3c952ae..5dddaca 100644
+--- a/src/map/clif.cpp
++++ b/src/map/clif.cpp
+@@ -11625,13 +11625,13 @@ void clif_parse_Emotion(int32 fd, map_session_data *sd){
+ 		return;
+ 	}
+ 
+-	const PACKET_CZ_REQ_EMOTION* p = reinterpret_cast<PACKET_CZ_REQ_EMOTION*>( RFIFOP( fd, 0 ) );
++	uint8 emotion_id = RFIFOB( fd, packet_db[RFIFOW( fd, 0 )].pos[0] );
+ 
+-	if( p->emotion_type >= ET_MAX ){
++	if( emotion_id >= ET_MAX ){
+ 		return;
+ 	}
+ 	
+-	emotion_type emoticon = static_cast<emotion_type>( p->emotion_type );
++	emotion_type emoticon = static_cast<emotion_type>( emotion_id );
+ 
+ 	if (battle_config.basic_skill_check == 0 || pc_checkskill(sd, NV_BASIC) >= 2 || pc_checkskill(sd, SU_BASIC_SKILL) >= 1) {
+ 		if (emoticon == ET_CHAT_PROHIBIT) {// prevent use of the mute emote [Valaris]
+@@ -11836,6 +11836,11 @@ void clif_parse_ActionRequest(int32 fd, map_session_data *sd)
+ ///     1 = char-select (disconnect)
+ void clif_parse_Restart(int32 fd, map_session_data *sd)
+ {
++	if( pc_is_soul_revive_pending(sd) ){
++		clif_displaymessage(sd->fd, "You cannot restart while awaiting revival.");
++		return;
++	}
++
+ 	switch(RFIFOB(fd,packet_db[RFIFOW(fd,0)].pos[0])) {
+ 	case 0x00:
+ 		pc_respawn(sd,CLR_OUTSIGHT);
+diff --git a/src/map/clif_packetdb.hpp b/src/map/clif_packetdb.hpp
+index 79cf8ca..04a236e 100644
+--- a/src/map/clif_packetdb.hpp
++++ b/src/map/clif_packetdb.hpp
+@@ -2027,7 +2027,7 @@
+ #endif
+ 
+ #if PACKETVER_MAIN_NUM >= 20230705
+-	parseable_packet( HEADER_CZ_REQ_EMOTION_EXPANSION, sizeof( struct PACKET_CZ_REQ_EMOTION_EXPANSION ), clif_parse_dull, 0 );
++	parseable_packet( HEADER_CZ_REQ_EMOTION_EXPANSION, sizeof( struct PACKET_CZ_REQ_EMOTION_EXPANSION ), clif_parse_Emotion, 4 );
+ #endif
+ 
+ #if PACKETVER_MAIN_NUM >= 20230802
+diff --git a/src/map/map.hpp b/src/map/map.hpp
+index d32f752..d941125 100644
+--- a/src/map/map.hpp
++++ b/src/map/map.hpp
+@@ -695,6 +695,7 @@ enum e_mapflag : int16 {
+ 	MF_SPECIALPOPUP,
+ 	MF_NOMACROCHECKER,
+ 	MF_INVINCIBLE_TIME,
++	MF_AINCRAD,
+ 	MF_MAX
+ };
+ 
+diff --git a/src/map/mob.cpp b/src/map/mob.cpp
+index 8bb2032..a9e492d 100644
+--- a/src/map/mob.cpp
++++ b/src/map/mob.cpp
+@@ -86,6 +86,114 @@ MobSummonDatabase mob_summon_db;
+ MobChatDatabase mob_chat_db;
+ MapDropDatabase map_drop_db;
+ 
++
++struct s_mvp_solo_lockout {
++	int32 consecutive_kills;
++	time_t cooldown_until;
++};
++
++static std::unordered_map<uint32, s_mvp_solo_lockout> mvp_solo_lockouts;
++
++static map_session_data* mob_mvp_get_player_source( block_list* src ){
++	if( src == nullptr )
++		return nullptr;
++
++	switch( src->type ){
++		case BL_PC:
++			return BL_CAST(BL_PC, src);
++		case BL_HOM: {
++			homun_data* hd = BL_CAST(BL_HOM, src);
++			return hd != nullptr ? hd->master : nullptr;
++		}
++		case BL_MER: {
++			s_mercenary_data* mer = BL_CAST(BL_MER, src);
++			return mer != nullptr ? mer->master : nullptr;
++		}
++		case BL_PET: {
++			pet_data* pd = BL_CAST(BL_PET, src);
++			return pd != nullptr ? pd->master : nullptr;
++		}
++		case BL_ELEM: {
++			s_elemental_data* ele = BL_CAST(BL_ELEM, src);
++			return ele != nullptr ? ele->master : nullptr;
++		}
++		case BL_MOB: {
++			mob_data* md = BL_CAST(BL_MOB, src);
++			if( md != nullptr && md->special_state.ai && md->master_id )
++				return map_id2sd(md->master_id);
++			return nullptr;
++		}
++		default:
++			return nullptr;
++	}
++}
++
++static void mob_mvp_clear_lock( mob_data* md ){
++	md->mvp_lock_type = MVP_LOCK_NONE;
++	md->mvp_lock_char_id = 0;
++	md->mvp_lock_account_id = 0;
++	md->mvp_lock_party_id = 0;
++	md->mvp_lock_last_damage_tick = 0;
++}
++
++static bool mob_mvp_party_has_active_member( mob_data* md, int32 party_id ){
++	if( party_id == 0 )
++		return false;
++
++	struct s_mapiterator* iter = mapit_getallusers();
++	map_session_data* sd;
++	bool active = false;
++
++	for( sd = (TBL_PC*)mapit_first(iter); mapit_exists(iter); sd = (TBL_PC*)mapit_next(iter) ){
++		if( sd->status.party_id != party_id )
++			continue;
++		if( sd->m != md->m )
++			continue;
++		if( pc_isdead(sd) )
++			continue;
++
++		active = true;
++		break;
++	}
++
++	mapit_free(iter);
++	return active;
++}
++
++static bool mob_mvp_lock_holder_active( mob_data* md ){
++	switch( md->mvp_lock_type ){
++		case MVP_LOCK_PARTY:
++			return mob_mvp_party_has_active_member(md, md->mvp_lock_party_id);
++		case MVP_LOCK_SOLO: {
++			map_session_data* sd = map_charid2sd(md->mvp_lock_char_id);
++			if( sd == nullptr )
++				return false;
++			if( sd->m != md->m )
++				return false;
++			if( pc_isdead(sd) )
++				return false;
++			return true;
++		}
++		default:
++			return false;
++	}
++}
++
++static void mob_mvp_validate_lock( mob_data* md, t_tick tick ){
++	if( md->mvp_lock_type == MVP_LOCK_NONE )
++		return;
++
++	if( battle_config.mvp_lock_inactivity_timeout > 0 && md->mvp_lock_last_damage_tick > 0 ){
++		if( DIFF_TICK( tick, md->mvp_lock_last_damage_tick ) > battle_config.mvp_lock_inactivity_timeout ){
++			mob_mvp_clear_lock(md);
++			return;
++		}
++	}
++
++	if( !mob_mvp_lock_holder_active(md) )
++		mob_mvp_clear_lock(md);
++}
++
+ /*==========================================
+  * Local prototype declaration   (only required thing)
+  *------------------------------------------*/
+@@ -1200,6 +1308,7 @@ int32 mob_spawn (mob_data *md)
+ 		md->spotted_log[i] = 0;
+ 
+ 	md->dmglog.clear();
++	mob_mvp_clear_lock(md);
+ 
+ 	if (md->lootitems)
+ 		memset(md->lootitems, 0, sizeof(*md->lootitems));
+@@ -2537,8 +2646,20 @@ void mob_process_drop_list(std::shared_ptr<s_item_drop_list>& list, bool loot)
+ 		dir = DIR_NORTH;
+ 
+ 	for (std::shared_ptr<s_item_drop>& ditem : list->items) {
++		int16 map_id = list->m;
++		int16 drop_x = list->x;
++		int16 drop_y = list->y;
++
++		if( ditem->owner_charid > 0 ){
++			map_session_data* owner = map_charid2sd(ditem->owner_charid);
++			if( owner != nullptr && owner->m == list->m ){
++				drop_x = owner->x;
++				drop_y = owner->y;
++			}
++		}
++
+ 		map_addflooritem(&ditem->item_data, ditem->item_data.amount,
+-			list->m, list->x, list->y,
++			map_id, drop_x, drop_y,
+ 			list->first_charid, list->second_charid, list->third_charid, 4, ditem->mob_id, !loot, dir, BL_CHAR|BL_PET);
+ 		// The drop location loops between three locations: SE -> W -> N -> SE
+ 		if (dir <= DIR_NORTH)
+@@ -2597,6 +2718,11 @@ static void mob_item_drop(mob_data *md, std::shared_ptr<s_item_drop_list>& dlist
+ 		test_autoloot = test_autoloot && sd->m == md->m
+ 		&& check_distance_blxy(sd, dlist->x, dlist->y, AUTOLOOT_DISTANCE);
+ #endif
++	if( sd != nullptr )
++		ditem->owner_charid = sd->status.char_id;
++	else
++		ditem->owner_charid = dlist->first_charid;
++
+ 	if( test_autoloot ) {	//Autoloot.
+ 		struct party_data *p = party_search(sd->status.party_id);
+ 
+@@ -2669,6 +2795,65 @@ TIMER_FUNC(mob_respawn){
+ 	return 1;
+ }
+ 
++
++bool mob_mvp_damage_allowed( mob_data* md, block_list* src, int64 damage ){
++	if( md == nullptr )
++		return true;
++
++	if( !battle_config.mvp_lock_enable || md->get_bosstype() != BOSSTYPE_MVP )
++		return true;
++
++	if( src == nullptr )
++		return true;
++
++	t_tick tick = gettick();
++	mob_mvp_validate_lock(md, tick);
++
++	map_session_data* owner_sd = mob_mvp_get_player_source(src);
++	if( owner_sd == nullptr )
++		return true;
++
++	if( md->mvp_lock_type == MVP_LOCK_NONE ){
++		if( damage <= 0 )
++			return true;
++
++		if( src->type != BL_PC )
++			return false;
++
++		if( owner_sd->status.party_id != 0 ){
++			md->mvp_lock_type = MVP_LOCK_PARTY;
++			md->mvp_lock_party_id = owner_sd->status.party_id;
++			md->mvp_lock_char_id = 0;
++			md->mvp_lock_account_id = 0;
++		}else{
++			time_t now = time(nullptr);
++			auto it = mvp_solo_lockouts.find(owner_sd->status.account_id);
++			if( it != mvp_solo_lockouts.end() && it->second.cooldown_until > now )
++				return false;
++
++			md->mvp_lock_type = MVP_LOCK_SOLO;
++			md->mvp_lock_char_id = owner_sd->status.char_id;
++			md->mvp_lock_account_id = owner_sd->status.account_id;
++			md->mvp_lock_party_id = 0;
++		}
++
++		md->mvp_lock_last_damage_tick = tick;
++		return true;
++	}
++
++	bool allowed = false;
++	if( md->mvp_lock_type == MVP_LOCK_PARTY ){
++		allowed = owner_sd->status.party_id != 0 && owner_sd->status.party_id == md->mvp_lock_party_id;
++	}else if( md->mvp_lock_type == MVP_LOCK_SOLO ){
++		allowed = owner_sd->status.char_id == md->mvp_lock_char_id;
++	}
++
++	if( allowed && damage > 0 )
++		md->mvp_lock_last_damage_tick = tick;
++
++	return allowed;
++}
++
+ void mob_log_damage(mob_data* md, block_list* src, int64 damage, int64 damage_tanked)
+ {
+ 	uint32 char_id = 0;
+@@ -3542,6 +3727,17 @@ int32 mob_dead(mob_data *md, block_list *src, int32 type)
+ 		first_sd = nullptr;
+ 
+ 	rebirth =  ( md->sc.getSCE(SC_KAIZEL) || md->sc.getSCE(SC_ULTIMATE_S) || (md->sc.getSCE(SC_REBIRTH) && !md->state.rebirth) );
++
++	if( !rebirth && md->get_bosstype() == BOSSTYPE_MVP && battle_config.mvp_solo_kill_limit > 0 && md->mvp_lock_type == MVP_LOCK_SOLO && md->mvp_lock_account_id > 0 ) {
++		s_mvp_solo_lockout& entry = mvp_solo_lockouts[md->mvp_lock_account_id];
++		entry.consecutive_kills++;
++
++		if( entry.consecutive_kills >= battle_config.mvp_solo_kill_limit ) {
++			entry.consecutive_kills = 0;
++			entry.cooldown_until = time(nullptr) + battle_config.mvp_solo_cooldown;
++		}
++	}
++
+ 	if( !rebirth ) { // Only trigger event on final kill
+ 		if( src ) {
+ 			switch( src->type ) { //allowed type
+@@ -3650,6 +3846,7 @@ int32 mob_dead(mob_data *md, block_list *src, int32 type)
+ 
+ 	if( !rebirth )
+ 		mob_setdelayspawn(md); //Set respawning.
++	mob_mvp_clear_lock(md);
+ 	return 3; //Remove from map.
+ }
+ 
+@@ -3667,6 +3864,7 @@ void mob_revive(mob_data *md, uint32 hp)
+ 	md->last_pcneartime = 0;
+ 	//We reset the damage log and then set the already lost damage as self damage so players don't get exp for it [Playtester]
+ 	md->dmglog.clear();
++	mob_mvp_clear_lock(md);
+ 	mob_log_damage(md, md, static_cast<int64>(md->status.max_hp - hp));
+ 	if (!md->prev){
+ 		if(map_addblock(md))
+@@ -3848,6 +4046,7 @@ int32 mob_class_change (mob_data *md, int32 mob_id)
+ 
+ 	if (battle_config.monster_class_change_recover) {
+ 		md->dmglog.clear();
++		mob_mvp_clear_lock(md);
+ 	} else {
+ 		md->status.hp = md->status.max_hp*hp_rate/100;
+ 		if(md->status.hp < 1) md->status.hp = 1;
+diff --git a/src/map/mob.hpp b/src/map/mob.hpp
+index 47e1a32..1ae431f 100644
+--- a/src/map/mob.hpp
++++ b/src/map/mob.hpp
+@@ -147,6 +147,12 @@ enum e_mob_bosstype : uint8{
+ 	BOSSTYPE_MVP
+ };
+ 
++enum e_mvp_lock_type : uint8 {
++	MVP_LOCK_NONE = 0,
++	MVP_LOCK_PARTY,
++	MVP_LOCK_SOLO
++};
++
+ /// Monster Aegis AI types
+ enum e_aegis_monstertype : uint16 {
+ 	MONSTER_TYPE_01 = 0x81,
+@@ -398,6 +404,12 @@ struct mob_data : public block_list {
+ 	int32 tomb_nid;
+ 	uint16 damagetaken;
+ 
++	e_mvp_lock_type mvp_lock_type;
++	uint32 mvp_lock_char_id;
++	uint32 mvp_lock_account_id;
++	int32 mvp_lock_party_id;
++	t_tick mvp_lock_last_damage_tick;
++
+ 	e_mob_bosstype get_bosstype() const;
+ 	map_session_data* get_mvp_player(map_session_data* first_sd);
+ };
+@@ -486,6 +498,7 @@ struct s_item_drop{
+ 	struct item item_data;
+ 	uint16 mob_id;
+ 	enum bl_type src_type;
++	int32 owner_charid;
+ };
+ 
+ struct s_item_drop_list{
+@@ -535,6 +548,7 @@ int32 mob_parse_dataset(struct spawn_data *data);
+ void mob_log_damage(mob_data* md, block_list* src, int64 damage, int64 damage_tanked = 0);
+ void mob_damage(mob_data *md, block_list *src, int32 damage);
+ int32 mob_dead(mob_data *md, block_list *src, int32 type);
++bool mob_mvp_damage_allowed(mob_data* md, block_list* src, int64 damage);
+ void mob_revive(mob_data *md, uint32 hp);
+ void mob_heal(mob_data *md,uint32 heal);
+ 
+diff --git a/src/map/pc.cpp b/src/map/pc.cpp
+index 29bde3e..fb92773 100755
+--- a/src/map/pc.cpp
++++ b/src/map/pc.cpp
+@@ -6,6 +6,7 @@
+ #include <cmath>
+ #include <cstdlib>
+ #include <map>
++#include <unordered_set>
+ 
+ #ifdef MAP_GENERATOR
+ #include <fstream>
+@@ -72,6 +73,23 @@ CaptchaDatabase captcha_db;
+ const char *macro_allowed_answer_chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890";
+ 
+ int32 pc_split_atoui(char* str, uint32* val, char sep, int32 max);
++
++static std::unordered_set<uint64> card_combo_blacklist;
++
++static uint64 pc_card_combo_key( t_itemid card_a, t_itemid card_b ){
++	if( card_a > card_b )
++		std::swap( card_a, card_b );
++
++	return ( static_cast<uint64>( card_a ) << 32 ) | static_cast<uint64>( card_b );
++}
++
++static bool pc_card_combo_is_blacklisted( t_itemid card_a, t_itemid card_b ){
++	if( card_a == 0 || card_b == 0 )
++		return false;
++
++	return card_combo_blacklist.find( pc_card_combo_key( card_a, card_b ) ) != card_combo_blacklist.end();
++}
++
+ static inline bool pc_attendance_rewarded_today( map_session_data* sd );
+ 
+ #define PVP_CALCRANK_INTERVAL 1000	// PVP calculation interval
+@@ -2124,6 +2142,7 @@ bool pc_authok(map_session_data *sd, uint32 login_id2, time_t expiration_time, i
+ 	sd->pvp_timer = INVALID_TIMER;
+ 	sd->expiration_tid = INVALID_TIMER;
+ 	sd->autotrade_tid = INVALID_TIMER;
++	sd->soul_deadline_tid = INVALID_TIMER;
+ 	sd->respawn_tid = INVALID_TIMER;
+ 	sd->tid_queue_active = INVALID_TIMER;
+ 	sd->macro_detect.timer = INVALID_TIMER;
+@@ -5601,6 +5620,18 @@ int32 pc_insert_card(map_session_data* sd, int32 idx_card, int32 idx_equip)
+ 	if( i == item_eq->slots )
+ 		return 0; // no free slots
+ 
++	for( uint8 slot = 0; slot < item_eq->slots; slot++ ){
++		t_itemid equipped_card = sd->inventory.u.items_inventory[idx_equip].card[slot];
++
++		if( equipped_card == 0 )
++			continue;
++
++		if( pc_card_combo_is_blacklisted( equipped_card, sd->inventory.u.items_inventory[idx_card].nameid ) ){
++			clif_displaymessage( sd->fd, "This card combination is blacklisted by the server." );
++			return 0;
++		}
++	}
++
+ 	// remember the card id to insert
+ 	nameid = sd->inventory.u.items_inventory[idx_card].nameid;
+ 
+@@ -9648,10 +9679,21 @@ int32 pc_skillheal2_bonus(map_session_data *sd, uint16 skill_id) {
+ 	return bonus;
+ }
+ 
++bool pc_is_soul_revive_pending(const map_session_data* sd)
++{
++	if( sd == nullptr || !pc_isdead(sd) || sd->soul_deadline_tid == INVALID_TIMER )
++		return false;
++
++	map_data* mapdata = map_getmapdata(sd->m);
++	return mapdata != nullptr && mapdata->getMapFlag(MF_AINCRAD);
++}
++
+ void pc_respawn(map_session_data* sd, clr_type clrtype)
+ {
+ 	if( !pc_isdead(sd) )
+ 		return; // not applicable
++	if( pc_is_soul_revive_pending(sd) )
++		return; // Lost Souls death window blocks normal restart/respawn bypass
+ 	if( sd->bg_id && bg_member_respawn(sd) )
+ 		return; // member revived by battleground
+ 
+@@ -9783,6 +9825,11 @@ int32 pc_dead(map_session_data *sd,block_list *src)
+ 			status_percent_heal(sd, 100, 100);
+ 			clif_resurrection( *sd );
+ 			pc_setinvincibletimer( *sd );
++
++			if( sd->soul_deadline_tid != INVALID_TIMER ){
++				delete_timer( sd->soul_deadline_tid, pc_soul_deadline_timer );
++				sd->soul_deadline_tid = INVALID_TIMER;
++			}
+ 			sc_start(sd,sd,SC_STEELBODY,100,5,skill_get_time(MO_STEELBODY,5));
+ 			if(mapdata_flag_gvg2(mapdata))
+ 				pc_respawn_timer(INVALID_TIMER, gettick(), sd->id, 0);
+@@ -9877,6 +9924,14 @@ int32 pc_dead(map_session_data *sd,block_list *src)
+ 
+ 	clif_party_dead( *sd );
+ 
++	if( sd->soul_deadline_tid != INVALID_TIMER ){
++		delete_timer( sd->soul_deadline_tid, pc_soul_deadline_timer );
++		sd->soul_deadline_tid = INVALID_TIMER;
++	}
++
++	if( mapdata->getMapFlag(MF_AINCRAD) )
++		sd->soul_deadline_tid = add_timer( tick + 120000, pc_soul_deadline_timer, sd->id, 0 );
++
+ 	pc_setparam(sd, SP_PCDIECOUNTER, sd->die_counter+1);
+ 	pc_setparam(sd, SP_KILLERRID, src?src->id:0);
+ 
+@@ -10145,6 +10200,11 @@ void pc_revive(map_session_data *sd,uint32 hp, uint32 sp, uint32 ap) {
+ 	pc_setstand(sd, true);
+ 	pc_setinvincibletimer( *sd );
+ 
++	if( sd->soul_deadline_tid != INVALID_TIMER ){
++		delete_timer( sd->soul_deadline_tid, pc_soul_deadline_timer );
++		sd->soul_deadline_tid = INVALID_TIMER;
++	}
++
+ 	if (sd->state.gmaster_flag && sd->guild) {
+ 		guild_guildaura_refresh(sd,GD_LEADERSHIP,guild_checkskill(sd->guild->guild,GD_LEADERSHIP));
+ 		guild_guildaura_refresh(sd,GD_GLORYWOUNDS,guild_checkskill(sd->guild->guild,GD_GLORYWOUNDS));
+@@ -14435,6 +14495,31 @@ static bool pc_readdb_job_noenter_map( char *str[], size_t columns, size_t curre
+ 	return true;
+ }
+ 
++
++static bool pc_readdb_card_combo_blacklist( char *str[], size_t columns, size_t current ){
++	t_itemid card_a = static_cast<t_itemid>( strtoul( str[0], nullptr, 10 ) );
++	t_itemid card_b = static_cast<t_itemid>( strtoul( str[1], nullptr, 10 ) );
++
++	if( card_a == 0 || card_b == 0 ){
++		ShowError( "pc_readdb_card_combo_blacklist: Invalid card pair '%s,%s'.\n", str[0], str[1] );
++		return false;
++	}
++
++	if( !item_db.exists( card_a ) || itemdb_type( card_a ) != IT_CARD ){
++		ShowError( "pc_readdb_card_combo_blacklist: Item %u is not a card.\n", card_a );
++		return false;
++	}
++
++	if( !item_db.exists( card_b ) || itemdb_type( card_b ) != IT_CARD ){
++		ShowError( "pc_readdb_card_combo_blacklist: Item %u is not a card.\n", card_b );
++		return false;
++	}
++
++	card_combo_blacklist.insert( pc_card_combo_key( card_a, card_b ) );
++
++	return true;
++}
++
+ const std::string PlayerStatPointDatabase::getDefaultLocation() {
+ 	return std::string(db_path) + "/statpoint.yml";
+ }
+@@ -14586,6 +14671,7 @@ void pc_readdb(void) {
+ 		
+ 	//reset
+ 	job_db.clear(); // job_info table
++	card_combo_blacklist.clear();
+ 
+ #if defined(RENEWAL_DROP) || defined(RENEWAL_EXP)
+ 	penalty_db.load();
+@@ -14610,6 +14696,7 @@ void pc_readdb(void) {
+ 		}
+ 
+ 		sv_readdb(dbsubpath2, "job_noenter_map.txt", ',', 3, 3, CLASS_COUNT, &pc_readdb_job_noenter_map, i > 0);
++		sv_readdb(dbsubpath2, "card_combo_blacklist.txt", ',', 2, 2, UINT16_MAX, &pc_readdb_card_combo_blacklist, i > 0);
+ 		aFree(dbsubpath1);
+ 		aFree(dbsubpath2);
+ 	}
+@@ -14839,6 +14926,22 @@ TIMER_FUNC(pc_expiration_timer){
+ 	return 0;
+ }
+ 
++
++TIMER_FUNC(pc_soul_deadline_timer){
++	map_session_data *sd = map_id2sd(id);
++
++	if( !sd )
++		return 0;
++
++	sd->soul_deadline_tid = INVALID_TIMER;
++
++	if( !pc_isdead(sd) )
++		return 0;
++
++	npc_event_do_id("LOST_SOULS::OnSoulLost", sd->id);
++	return 0;
++}
++
+ TIMER_FUNC(pc_autotrade_timer){
+ 	map_session_data *sd = map_id2sd(id);
+ 
+@@ -16128,6 +16231,7 @@ void do_init_pc(void) {
+ 	add_timer_func_list(pc_spiritcharm_timer, "pc_spiritcharm_timer");
+ 	add_timer_func_list(pc_global_expiration_timer, "pc_global_expiration_timer");
+ 	add_timer_func_list(pc_expiration_timer, "pc_expiration_timer");
++	add_timer_func_list(pc_soul_deadline_timer, "pc_soul_deadline_timer");
+ 	add_timer_func_list(pc_autotrade_timer, "pc_autotrade_timer");
+ 	add_timer_func_list(pc_on_expire_active, "pc_on_expire_active");
+ 	add_timer_func_list(pc_macro_detector_timeout, "pc_macro_detector_timeout");
+diff --git a/src/map/pc.hpp b/src/map/pc.hpp
+index 6f96f97..d757aa4 100644
+--- a/src/map/pc.hpp
++++ b/src/map/pc.hpp
+@@ -906,6 +906,7 @@ public:
+ 	int16 last_addeditem_index; /// Index of latest item added
+ 	int32 autotrade_tid;
+ 	int32 respawn_tid;
++	int32 soul_deadline_tid;
+ 	int32 bank_vault; ///< Bank Vault
+ 
+ #ifdef PACKET_OBFUSCATION
+@@ -1392,6 +1393,7 @@ bool pc_should_log_commands( const map_session_data* sd );
+ 
+ void pc_setrestartvalue(map_session_data *sd, char type);
+ void pc_makesavestatus(map_session_data *sd);
++bool pc_is_soul_revive_pending(const map_session_data* sd);
+ void pc_respawn(map_session_data* sd, clr_type clrtype);
+ void pc_setnewpc(map_session_data *sd, uint32 account_id, uint32 char_id, int32 login_id1, t_tick client_tick, int32 sex, int32 fd);
+ bool pc_authok(map_session_data *sd, uint32 login_id2, time_t expiration_time, int32 group_id, struct mmo_charstatus *st, bool changing_mapservers);
+@@ -1417,6 +1419,7 @@ bool pc_checkequip2( const map_session_data* sd, t_itemid nameid, int32 min, int
+ void pc_scdata_received(map_session_data *sd);
+ void pc_check_expiration(map_session_data *sd);
+ TIMER_FUNC(pc_expiration_timer);
++TIMER_FUNC(pc_soul_deadline_timer);
+ TIMER_FUNC(pc_global_expiration_timer);
+ void pc_expire_check(map_session_data *sd);
+ 
+diff --git a/src/map/script_constants.hpp b/src/map/script_constants.hpp
+index 443725c..61ac2f2 100644
+--- a/src/map/script_constants.hpp
++++ b/src/map/script_constants.hpp
+@@ -536,6 +536,7 @@
+ 	export_constant(MF_SPECIALPOPUP);
+ 	export_constant(MF_NOMACROCHECKER);
+ 	export_constant(MF_INVINCIBLE_TIME);
++	export_constant(MF_AINCRAD);
+ 
+ 	/* setcell types */
+ 	export_constant(CELL_WALKABLE);
+diff --git a/src/map/status.cpp b/src/map/status.cpp
+index 8f9216d..7b945bf 100644
+--- a/src/map/status.cpp
++++ b/src/map/status.cpp
+@@ -1626,6 +1626,13 @@ int32 status_damage(block_list *src,block_list *target,int64 dhp, int64 dsp, int
+ 			dhp = status->hp - 1;
+ 	}
+ 
++	if( target->type == BL_MOB && !mob_mvp_damage_allowed( reinterpret_cast<mob_data*>(target), src, dhp ) ){
++		hp = 0;
++		sp = 0;
++		ap = 0;
++		dhp = 0;
++	}
++
+ 	status->hp-= hp;
+ 	status->sp-= sp;
+ 	status->ap-= ap;
+-- 
+2.43.0
+
